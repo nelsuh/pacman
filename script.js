@@ -299,6 +299,30 @@ function atTileCenter(p, eps=0.08) {
          Math.abs(p.y - Math.round(p.y)) < eps;
 }
 
+function eatAt(p) {
+  const tx = Math.round(p.x);
+  const ty = Math.round(p.y);
+  const c = grid[ty] && grid[ty][tx];
+  if (c !== "." && c !== "o") return;
+  const isPellet = c === "o";
+  grid[ty][tx] = " ";
+  const idx = pacmen.indexOf(p);
+  pacmen[idx].score += isPellet ? SCORE_PELLET : SCORE_DOT;
+  if (isPellet) pacmen[idx].powered = POWER_TIME;
+  totalDots--;
+  updateScores();
+  if (isMultiplayer && idx === myPlayer) {
+    Usion.game.realtime("eat", {
+      x: tx, y: ty, pellet: isPellet,
+      score: pacmen[idx].score, powered: pacmen[idx].powered,
+    });
+  }
+  if (totalDots <= 0) endGame();
+}
+
+// Substep movement: never advances past a tile center in a single sub-step,
+// so wall-stop and direction changes fire exactly at each center even when
+// dt is large (tab switch, lag, etc.). Prevents wall-clipping.
 function step(p, dt) {
   if (p.dead > 0) {
     p.dead -= dt;
@@ -306,52 +330,50 @@ function step(p, dt) {
       p.dead = 0;
       const idx = pacmen.indexOf(p) - 1;
       p.x = spawn[idx].x; p.y = spawn[idx].y;
-      p.dir = {dx:0,dy:0}; p.nextDir = {dx:0,dy:0};
+      p.dir = { dx: 0, dy: 0 };
+      p.nextDir = { dx: 0, dy: 0 };
     }
     return;
   }
+  if (p.powered > 0) p.powered = Math.max(0, p.powered - dt);
 
-  if (p.powered > 0) {
-    p.powered = Math.max(0, p.powered - dt);
-  }
-
-  // try to apply pending direction at tile center
-  if (atTileCenter(p)) {
-    p.x = Math.round(p.x);
-    p.y = Math.round(p.y);
-    if ((p.nextDir.dx || p.nextDir.dy) &&
-        canMove(p, p.nextDir.dx, p.nextDir.dy)) {
-      p.dir = { dx: p.nextDir.dx, dy: p.nextDir.dy };
-    }
-    // if current dir blocked, stop
-    if (!canMove(p, p.dir.dx, p.dir.dy)) {
-      p.dir = { dx: 0, dy: 0 };
-    }
-  }
-
-  // move
   const speed = SPEED * (p.powered > 0 ? 1.1 : 1.0);
-  p.x += p.dir.dx * speed * dt;
-  p.y += p.dir.dy * speed * dt;
+  let remaining = dt * speed;
+  let guard = 32;
 
-  // eat dot/pellet at current tile (only when near center)
-  const tx = Math.round(p.x);
-  const ty = Math.round(p.y);
-  if (Math.abs(p.x - tx) < 0.45 && Math.abs(p.y - ty) < 0.45) {
-    const c = grid[ty] && grid[ty][tx];
-    if (c === "." || c === "o") {
-      const isPellet = c === "o";
-      grid[ty][tx] = " ";
-      const idx = pacmen.indexOf(p);
-      pacmen[idx].score += isPellet ? SCORE_PELLET : SCORE_DOT;
-      if (isPellet) pacmen[idx].powered = POWER_TIME;
-      totalDots--;
-      updateScores();
-      if (isMultiplayer && idx === myPlayer) {
-        Usion.game.realtime("eat", { x: tx, y: ty, pellet: isPellet, score: pacmen[idx].score, powered: pacmen[idx].powered });
+  while (remaining > 1e-6 && guard-- > 0) {
+    const tx = Math.round(p.x);
+    const ty = Math.round(p.y);
+    const atCenter = Math.abs(p.x - tx) < 1e-3 && Math.abs(p.y - ty) < 1e-3;
+
+    if (atCenter) {
+      p.x = tx; p.y = ty;
+      // apply buffered direction if it doesn't lead into a wall
+      if ((p.nextDir.dx || p.nextDir.dy) && canMove(p, p.nextDir.dx, p.nextDir.dy)) {
+        p.dir = { dx: p.nextDir.dx, dy: p.nextDir.dy };
       }
-      if (totalDots <= 0) endGame();
+      // stop if current direction is blocked by a wall
+      if (!canMove(p, p.dir.dx, p.dir.dy)) {
+        p.dir = { dx: 0, dy: 0 };
+      }
+      eatAt(p);
+      if (p.dir.dx === 0 && p.dir.dy === 0) break;
     }
+
+    // distance to the NEXT tile center along motion axis (using floor/ceil so
+    // we never skip a center when p is already past the half-tile mark)
+    let distToNext;
+    if (p.dir.dx > 0)      distToNext = (Math.floor(p.x) + 1) - p.x;
+    else if (p.dir.dx < 0) distToNext = p.x - (Math.ceil(p.x) - 1);
+    else if (p.dir.dy > 0) distToNext = (Math.floor(p.y) + 1) - p.y;
+    else if (p.dir.dy < 0) distToNext = p.y - (Math.ceil(p.y) - 1);
+    else break;
+    if (distToNext <= 1e-9) distToNext = 1;
+
+    const advance = Math.min(remaining, distToNext);
+    p.x += p.dir.dx * advance;
+    p.y += p.dir.dy * advance;
+    remaining -= advance;
   }
 }
 
@@ -424,35 +446,72 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-document.querySelectorAll(".dbtn").forEach((btn) => {
-  const handle = (e) => {
-    e.preventDefault();
-    const d = btn.dataset.dir;
-    if (d === "up") setMyDir(0, -1);
-    else if (d === "down") setMyDir(0, 1);
-    else if (d === "left") setMyDir(-1, 0);
-    else if (d === "right") setMyDir(1, 0);
-  };
-  btn.addEventListener("touchstart", handle, { passive: false });
-  btn.addEventListener("mousedown", handle);
-});
+// ── Invisible joystick (mobile only) ──────────────────────
+// Touch anywhere on the board, drag to set direction. The visual ring is
+// centered where you first touched and the inner stick tracks your finger.
+const joystickEl = document.getElementById("joystick");
+const stickEl    = document.getElementById("joystickStick");
+const JOY_DEAD   = 14;   // px deadzone before a direction registers
+const JOY_RADIUS = 40;   // px max stick offset from center
 
-// swipe on canvas
-let swipeStart = null;
-canvas.addEventListener("touchstart", (e) => {
-  const t = e.touches[0];
-  swipeStart = { x: t.clientX, y: t.clientY };
-}, { passive: true });
-canvas.addEventListener("touchend", (e) => {
-  if (!swipeStart) return;
-  const t = e.changedTouches[0];
-  const dx = t.clientX - swipeStart.x;
-  const dy = t.clientY - swipeStart.y;
-  if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
+let joyOrigin = null;
+let joyTouchId = null;
+
+function joyShow(x, y) {
+  joystickEl.style.left = x + "px";
+  joystickEl.style.top  = y + "px";
+  stickEl.style.left = "50%";
+  stickEl.style.top  = "50%";
+  joystickEl.classList.add("show");
+}
+function joyHide() {
+  joystickEl.classList.remove("show");
+  joyOrigin = null;
+  joyTouchId = null;
+}
+function joyUpdate(x, y) {
+  if (!joyOrigin) return;
+  let dx = x - joyOrigin.x;
+  let dy = y - joyOrigin.y;
+  const mag = Math.hypot(dx, dy);
+  if (mag > JOY_RADIUS) {
+    dx = dx * JOY_RADIUS / mag;
+    dy = dy * JOY_RADIUS / mag;
+  }
+  stickEl.style.left = (50 + (dx / JOY_RADIUS) * 50) + "%";
+  stickEl.style.top  = (50 + (dy / JOY_RADIUS) * 50) + "%";
+  if (mag < JOY_DEAD) return;
+  // dominant axis sets direction
   if (Math.abs(dx) > Math.abs(dy)) setMyDir(dx > 0 ? 1 : -1, 0);
-  else setMyDir(0, dy > 0 ? 1 : -1);
-  swipeStart = null;
-}, { passive: true });
+  else                              setMyDir(0, dy > 0 ? 1 : -1);
+}
+
+canvas.addEventListener("touchstart", (e) => {
+  if (joyTouchId !== null) return;
+  const t = e.changedTouches[0];
+  joyTouchId = t.identifier;
+  joyOrigin = { x: t.clientX, y: t.clientY };
+  joyShow(t.clientX, t.clientY);
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (e) => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouchId) {
+      joyUpdate(t.clientX, t.clientY);
+      e.preventDefault();
+      break;
+    }
+  }
+}, { passive: false });
+
+function endTouch(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouchId) { joyHide(); break; }
+  }
+}
+canvas.addEventListener("touchend",    endTouch, { passive: true });
+canvas.addEventListener("touchcancel", endTouch, { passive: true });
 
 // ── Bot AI ────────────────────────────────────────────────
 let botRetargetTimer = 0;
@@ -721,7 +780,8 @@ function updateScores() {
 function updateStatus(text) {
   if (text) { statusEl.textContent = text; return; }
   if (gameOver) return;
-  statusEl.textContent = isMultiplayer ? "Eat dots! Power up to eat opponent." : "Arrow keys / swipe to move";
+  const hint = ("ontouchstart" in window) ? "Drag anywhere to move" : "Arrow keys or WASD to move";
+  statusEl.textContent = isMultiplayer ? "Eat dots! Power up to eat opponent." : hint;
 }
 
 function hideBanner() { winnerBanner.hidden = true; }

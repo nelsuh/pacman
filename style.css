@@ -84,28 +84,37 @@ body {
   display: block;
 }
 
-.dpad {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: 60px 60px 60px;
-  grid-template-rows: 60px 60px;
-  gap: 6px;
+/* On-screen D-pad is touch-only; desktop uses arrow keys / WASD. */
+.dpad { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .dpad {
+    display: none; /* invisible joystick on canvas instead — keep dpad hidden */
+  }
 }
-.dbtn {
-  background: rgba(255,255,255,0.1);
-  border: 1.5px solid rgba(255,255,255,0.2);
-  color: white;
-  border-radius: 14px;
-  font-size: 22px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.1s;
+
+/* Floating invisible-joystick visualization (only renders while dragging) */
+.joystick {
+  position: fixed;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.35);
+  background: rgba(255,255,255,0.06);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  display: none;
+  z-index: 30;
 }
-.dbtn:active { background: rgba(255,255,255,0.28); transform: scale(0.94); }
-.dbtn.up    { grid-column: 2; grid-row: 1; }
-.dbtn.left  { grid-column: 1; grid-row: 2; }
-.dbtn.right { grid-column: 3; grid-row: 2; }
-.dbtn.down  { grid-column: 2; grid-row: 2; }
+.joystick .stick {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.55);
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+}
+.joystick.show { display: block; }
 
 .controls {
   margin-top: 14px;
