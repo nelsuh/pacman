@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Pac Duel</title>
+<link rel="stylesheet" href="https://usions.com/usion-design-system.css">
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="phone">
+
+  <div class="topbar">
+
+    <div class="player left" id="player1Panel">
+      <img id="player1Avatar" src="https://api.dicebear.com/7.x/bottts/svg?seed=yellow">
+      <div class="name" id="player1Name">You</div>
+      <div class="score" id="player1Score">0</div>
+    </div>
+
+    <div class="vs">VS</div>
+
+    <div class="player right" id="player2Panel">
+      <img id="player2Avatar" src="https://api.dicebear.com/7.x/bottts/svg?seed=cyan">
+      <div class="name" id="player2Name">Bot</div>
+      <div class="score" id="player2Score">0</div>
+    </div>
+
+  </div>
+
+  <div class="turnIndicator" id="status">Eat dots to win!</div>
+
+  <canvas id="board" width="510" height="390"></canvas>
+
+  <div id="winnerBanner" class="winner-banner" hidden>
+    <span class="winner-banner-emoji" id="winnerEmoji">🏆</span>
+    <span class="winner-banner-text"><strong id="winnerNameDisplay">You</strong> win!</span>
+    <div class="winner-banner-actions">
+      <button class="winner-btn" id="winnerPlayAgain">Rematch</button>
+    </div>
+  </div>
+
+  <div class="dpad">
+    <button class="dbtn up"    data-dir="up">▲</button>
+    <button class="dbtn left"  data-dir="left">◀</button>
+    <button class="dbtn right" data-dir="right">▶</button>
+    <button class="dbtn down"  data-dir="down">▼</button>
+  </div>
+
+  <div class="controls">
+    <select id="difficulty">
+      <option value="easy">Easy</option>
+      <option value="medium" selected>Medium</option>
+      <option value="hard">Hard</option>
+    </select>
+  </div>
+
+</div>
+
+<div id="waitingOverlay" class="waiting-overlay">
+  <div class="waiting-card">
+    <div class="waiting-spinner"></div>
+    <p class="waiting-text">Waiting for opponent…</p>
+    <button class="waiting-bot-btn" id="playBotBtn">Play vs Bot instead</button>
+  </div>
+</div>
+
+<script src="https://usions.com/usion-sdk.js"></script>
+<script src="script.js"></script>
+
+</body>
+</html>
