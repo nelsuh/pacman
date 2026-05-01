@@ -85,21 +85,28 @@ const MAZES = [
 ];
 
 let mazeIndex = 0;
-let rematchSalt = 0;
 const MAZE = MAZES[0];
 const COLS = MAZE[0].length;
 const ROWS = MAZE.length;
 
-function pickMazeIndex() {
+// For the initial multiplayer game, both clients deterministically derive the
+// maze from sorted player IDs so they agree without an extra round-trip.
+// For rematches, the HOST (player whose id sorts first) picks the maze and
+// ships the index in the "started" message — see requestRematchAsHost / accept.
+function initialMazeIndex() {
   if (isMultiplayer && players.length >= 2) {
-    // deterministic across both clients: hash sorted player IDs + salt
-    const ids = [players[0] || "", players[1] || ""].slice().sort();
-    const seed = ids.join("|") + "|" + rematchSalt;
+    const ids = players.slice().sort();
+    const seed = ids.join("|");
     let h = 5381;
     for (let i = 0; i < seed.length; i++) h = ((h * 33) ^ seed.charCodeAt(i)) >>> 0;
     return h % MAZES.length;
   }
   return Math.floor(Math.random() * MAZES.length);
+}
+
+function isHost() {
+  if (!isMultiplayer || players.length < 2) return true;
+  return players.slice().sort()[0] === myId;
 }
 
 // ── Game State ────────────────────────────────────────────
@@ -185,8 +192,11 @@ function buildGrid() {
   if (spawnB) spawn[1] = spawnB;
 }
 
-function resetGame() {
-  mazeIndex = pickMazeIndex();
+// resetGame() picks a fresh maze (initial-game default).
+// resetGame(true) reuses whatever mazeIndex is currently set — used when the
+// rematch handler has already assigned the host-picked index.
+function resetGame(keepMaze) {
+  if (!keepMaze) mazeIndex = initialMazeIndex();
   buildGrid();
   pacmen[1].x = spawn[0].x; pacmen[1].y = spawn[0].y;
   pacmen[2].x = spawn[1].x; pacmen[2].y = spawn[1].y;
@@ -697,31 +707,41 @@ function onRealtime(data) {
   }
   if (data.action_type === "rematch" && data.action_data) {
     if (data.action_data.state === "requested") {
-      if (rematchRequested) {
-        rematchSalt++;
-        resetGame();
-        Usion.game.realtime("rematch", { state: "started" });
-      } else {
+      // Both ready → host picks the maze and ships it in "started".
+      // Non-host just waits.
+      if (rematchRequested && isHost()) {
+        hostStartRematch();
+      } else if (!rematchRequested) {
         rematchState = "requested";
         syncRematchUi();
       }
     } else if (data.action_data.state === "started") {
-      rematchSalt++;
-      resetGame();
+      if (typeof data.action_data.mazeIndex === "number") {
+        mazeIndex = data.action_data.mazeIndex;
+      }
+      resetGame(true);
     }
   }
 }
 
 function onRematchRequest(data) {
   if (data.player_id === myId) return;
-  if (rematchRequested) {
-    rematchSalt++;
-    resetGame();
-    Usion.game.realtime("rematch", { state: "started" });
+  if (rematchRequested && isHost()) {
+    hostStartRematch();
     return;
   }
-  rematchState = "requested";
-  syncRematchUi();
+  if (!rematchRequested) {
+    rematchState = "requested";
+    syncRematchUi();
+  }
+}
+
+// Host picks the next maze, broadcasts it as "started", and resets locally.
+// Only the host runs this — guarantees both clients use the same mazeIndex.
+function hostStartRematch() {
+  mazeIndex = Math.floor(Math.random() * MAZES.length);
+  Usion.game.realtime("rematch", { state: "started", mazeIndex });
+  resetGame(true);
 }
 
 function onGameRestarted() {
@@ -811,28 +831,30 @@ function showWinner() {
   winnerBanner.hidden = false;
 }
 
+function clickRematch() {
+  rematchRequested = true;
+  Usion.game.realtime("rematch", { state: "requested" });
+  Usion.game.requestRematch();
+  // Both sides have now requested → if I'm the host, ship the start.
+  if (rematchState === "requested" && isHost()) {
+    hostStartRematch();
+    return;
+  }
+  rematchState = "requested";
+  syncRematchUi();
+}
+
 function syncRematchUi() {
   if (rematchState === "requested" && !rematchRequested) {
     winnerBtn.textContent = "Accept Rematch";
     winnerBtn.disabled = false;
-    winnerBtn.onclick = () => {
-      rematchRequested = true;
-      resetGame();
-      Usion.game.realtime("rematch", { state: "started" });
-      Usion.game.requestRematch();
-    };
+    winnerBtn.onclick = clickRematch;
   } else if (rematchRequested) {
     winnerBtn.textContent = "Waiting for rematch…";
     winnerBtn.disabled = true;
   } else {
     winnerBtn.textContent = "Rematch";
     winnerBtn.disabled = false;
-    winnerBtn.onclick = () => {
-      rematchRequested = true;
-      rematchState = "requested";
-      syncRematchUi();
-      Usion.game.realtime("rematch", { state: "requested" });
-      Usion.game.requestRematch();
-    };
+    winnerBtn.onclick = clickRematch;
   }
 }
