@@ -116,10 +116,10 @@ let totalDots = 0;
 
 let pacmen = [
   null,
-  // player 1 (yellow)
-  { x: 1, y: 6, dir: {dx:0,dy:0}, nextDir: {dx:0,dy:0}, score: 0, powered: 0, color: "#ffe27a", dead: 0 },
-  // player 2 (cyan)
-  { x: 15, y: 6, dir: {dx:0,dy:0}, nextDir: {dx:0,dy:0}, score: 0, powered: 0, color: "#7adfff", dead: 0 },
+  // player 1 (yellow) — spawns on the left, faces right toward opponent
+  { x: 1, y: 6, dir: {dx:0,dy:0}, nextDir: {dx:0,dy:0}, facing: {dx: 1, dy: 0}, score: 0, powered: 0, color: "#ffe27a", dead: 0 },
+  // player 2 (cyan) — spawns on the right, faces left toward opponent
+  { x: 15, y: 6, dir: {dx:0,dy:0}, nextDir: {dx:0,dy:0}, facing: {dx: -1, dy: 0}, score: 0, powered: 0, color: "#7adfff", dead: 0 },
 ];
 
 const SPEED = 5.5;             // tiles/sec
@@ -200,6 +200,8 @@ function resetGame(keepMaze) {
   buildGrid();
   pacmen[1].x = spawn[0].x; pacmen[1].y = spawn[0].y;
   pacmen[2].x = spawn[1].x; pacmen[2].y = spawn[1].y;
+  pacmen[1].facing = { dx:  1, dy: 0 }; // yellow faces right toward opponent
+  pacmen[2].facing = { dx: -1, dy: 0 }; // cyan faces left toward opponent
   for (let i = 1; i <= 2; i++) {
     pacmen[i].dir = {dx:0, dy:0};
     pacmen[i].nextDir = {dx:0, dy:0};
@@ -260,11 +262,14 @@ function drawPac(p, ts) {
   const cx = p.x*ts + ts/2;
   const cy = p.y*ts + ts/2;
   const r = ts*0.42;
+  // Use current motion if moving; otherwise fall back to last-faced direction
+  // so a stopped pac doesn't snap back to facing right.
+  const f = (p.dir.dx || p.dir.dy) ? p.dir : (p.facing || { dx: 1, dy: 0 });
   let angle = 0;
-  if (p.dir.dx > 0) angle = 0;
-  else if (p.dir.dx < 0) angle = Math.PI;
-  else if (p.dir.dy < 0) angle = -Math.PI/2;
-  else if (p.dir.dy > 0) angle = Math.PI/2;
+  if (f.dx > 0) angle = 0;
+  else if (f.dx < 0) angle = Math.PI;
+  else if (f.dy < 0) angle = -Math.PI/2;
+  else if (f.dy > 0) angle = Math.PI/2;
 
   const mouth = (Math.sin(animMouth * Math.PI * 2) * 0.5 + 0.5) * 0.6 + 0.05;
   ctx.save();
@@ -342,6 +347,7 @@ function step(p, dt) {
       p.x = spawn[idx].x; p.y = spawn[idx].y;
       p.dir = { dx: 0, dy: 0 };
       p.nextDir = { dx: 0, dy: 0 };
+      p.facing = idx === 0 ? { dx: 1, dy: 0 } : { dx: -1, dy: 0 };
     }
     return;
   }
@@ -361,6 +367,7 @@ function step(p, dt) {
       // apply buffered direction if it doesn't lead into a wall
       if ((p.nextDir.dx || p.nextDir.dy) && canMove(p, p.nextDir.dx, p.nextDir.dy)) {
         p.dir = { dx: p.nextDir.dx, dy: p.nextDir.dy };
+        p.facing = { dx: p.dir.dx, dy: p.dir.dy };
       }
       // stop if current direction is blocked by a wall
       if (!canMove(p, p.dir.dx, p.dir.dy)) {
@@ -457,67 +464,47 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ── Invisible joystick (mobile only) ──────────────────────
-// Touch anywhere on the board, drag to set direction. The visual ring is
-// centered where you first touched and the inner stick tracks your finger.
-const joystickEl = document.getElementById("joystick");
-const stickEl    = document.getElementById("joystickStick");
-const JOY_DEAD   = 14;   // px deadzone before a direction registers
-const JOY_RADIUS = 40;   // px max stick offset from center
+// No visual at all — touch anywhere on the canvas, drag in a direction, and
+// the dominant axis of the drag from the touch origin sets the heading.
+// The origin re-anchors when you cross the deadzone in a new direction so
+// re-aiming feels instant without lifting your finger.
+const JOY_DEAD = 18;  // px the finger must travel before a direction registers
 
 let joyOrigin = null;
 let joyTouchId = null;
-
-function joyShow(x, y) {
-  joystickEl.style.left = x + "px";
-  joystickEl.style.top  = y + "px";
-  stickEl.style.left = "50%";
-  stickEl.style.top  = "50%";
-  joystickEl.classList.add("show");
-}
-function joyHide() {
-  joystickEl.classList.remove("show");
-  joyOrigin = null;
-  joyTouchId = null;
-}
-function joyUpdate(x, y) {
-  if (!joyOrigin) return;
-  let dx = x - joyOrigin.x;
-  let dy = y - joyOrigin.y;
-  const mag = Math.hypot(dx, dy);
-  if (mag > JOY_RADIUS) {
-    dx = dx * JOY_RADIUS / mag;
-    dy = dy * JOY_RADIUS / mag;
-  }
-  stickEl.style.left = (50 + (dx / JOY_RADIUS) * 50) + "%";
-  stickEl.style.top  = (50 + (dy / JOY_RADIUS) * 50) + "%";
-  if (mag < JOY_DEAD) return;
-  // dominant axis sets direction
-  if (Math.abs(dx) > Math.abs(dy)) setMyDir(dx > 0 ? 1 : -1, 0);
-  else                              setMyDir(0, dy > 0 ? 1 : -1);
-}
 
 canvas.addEventListener("touchstart", (e) => {
   if (joyTouchId !== null) return;
   const t = e.changedTouches[0];
   joyTouchId = t.identifier;
   joyOrigin = { x: t.clientX, y: t.clientY };
-  joyShow(t.clientX, t.clientY);
   e.preventDefault();
 }, { passive: false });
 
 canvas.addEventListener("touchmove", (e) => {
+  if (!joyOrigin) return;
   for (const t of e.changedTouches) {
-    if (t.identifier === joyTouchId) {
-      joyUpdate(t.clientX, t.clientY);
-      e.preventDefault();
-      break;
-    }
+    if (t.identifier !== joyTouchId) continue;
+    const dx = t.clientX - joyOrigin.x;
+    const dy = t.clientY - joyOrigin.y;
+    if (Math.hypot(dx, dy) < JOY_DEAD) return;
+    if (Math.abs(dx) > Math.abs(dy)) setMyDir(dx > 0 ? 1 : -1, 0);
+    else                              setMyDir(0, dy > 0 ? 1 : -1);
+    // re-anchor so the next direction change kicks in after a fresh drag,
+    // not the cumulative distance from the original touch point
+    joyOrigin = { x: t.clientX, y: t.clientY };
+    e.preventDefault();
+    break;
   }
 }, { passive: false });
 
 function endTouch(e) {
   for (const t of e.changedTouches) {
-    if (t.identifier === joyTouchId) { joyHide(); break; }
+    if (t.identifier === joyTouchId) {
+      joyOrigin = null;
+      joyTouchId = null;
+      break;
+    }
   }
 }
 canvas.addEventListener("touchend",    endTouch, { passive: true });
@@ -592,6 +579,8 @@ function maybeBroadcastPos(now) {
     x: me.x, y: me.y,
     dx: me.dir.dx, dy: me.dir.dy,
     ndx: me.nextDir.dx, ndy: me.nextDir.dy,
+    fx: (me.facing && me.facing.dx) || 0,
+    fy: (me.facing && me.facing.dy) || 0,
     powered: me.powered, dead: me.dead, score: me.score,
   });
 }
@@ -684,6 +673,11 @@ function onRealtime(data) {
     p.y = data.action_data.y;
     p.dir = { dx: data.action_data.dx, dy: data.action_data.dy };
     p.nextDir = { dx: data.action_data.ndx, dy: data.action_data.ndy };
+    if (data.action_data.fx !== undefined || data.action_data.fy !== undefined) {
+      const fx = data.action_data.fx || 0;
+      const fy = data.action_data.fy || 0;
+      if (fx || fy) p.facing = { dx: fx, dy: fy };
+    }
     p.powered = data.action_data.powered || 0;
     p.dead = data.action_data.dead || 0;
     p.score = data.action_data.score || 0;

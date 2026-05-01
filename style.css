@@ -84,37 +84,8 @@ body {
   display: block;
 }
 
-/* On-screen D-pad is touch-only; desktop uses arrow keys / WASD. */
-.dpad { display: none; }
-@media (hover: none) and (pointer: coarse) {
-  .dpad {
-    display: none; /* invisible joystick on canvas instead — keep dpad hidden */
-  }
-}
-
-/* Floating invisible-joystick visualization (only renders while dragging) */
-.joystick {
-  position: fixed;
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  border: 2px solid rgba(255,255,255,0.35);
-  background: rgba(255,255,255,0.06);
-  pointer-events: none;
-  transform: translate(-50%, -50%);
-  display: none;
-  z-index: 30;
-}
-.joystick .stick {
-  position: absolute;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.55);
-  top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-}
-.joystick.show { display: block; }
+/* No visible D-pad and no visible joystick. Mobile uses canvas-drag input
+   handled in script.js; desktop uses arrow keys / WASD. */
 
 .controls {
   margin-top: 14px;
