@@ -265,16 +265,17 @@ function drawPac(p, ts) {
   // Use current motion if moving; otherwise fall back to last-faced direction
   // so a stopped pac doesn't snap back to facing right.
   const f = (p.dir.dx || p.dir.dy) ? p.dir : (p.facing || { dx: 1, dy: 0 });
-  let angle = 0;
-  if (f.dx > 0) angle = 0;
-  else if (f.dx < 0) angle = Math.PI;
+  // Mirror for left, rotate for up/down — keeps the eye on top regardless of facing.
+  let angle = 0, scaleX = 1;
+  if (f.dx < 0)      scaleX = -1;
   else if (f.dy < 0) angle = -Math.PI/2;
-  else if (f.dy > 0) angle = Math.PI/2;
+  else if (f.dy > 0) angle =  Math.PI/2;
 
   const mouth = (Math.sin(animMouth * Math.PI * 2) * 0.5 + 0.5) * 0.6 + 0.05;
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(angle);
+  if (scaleX !== 1) ctx.scale(scaleX, 1);
+  else ctx.rotate(angle);
 
   if (p.powered > 0) {
     ctx.shadowColor = "#fff";
@@ -288,12 +289,15 @@ function drawPac(p, ts) {
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // eye
+  ctx.restore();
+
+  // Eye drawn in screen space, perpendicular to facing so it never sits in the mouth.
+  let ex = 0, ey = -r*0.45;
+  if (f.dy !== 0) { ex = r*0.45; ey = 0; }
   ctx.fillStyle = "#111";
   ctx.beginPath();
-  ctx.arc(0, -r*0.45, r*0.12, 0, Math.PI*2);
+  ctx.arc(cx + ex, cy + ey, r*0.12, 0, Math.PI*2);
   ctx.fill();
-  ctx.restore();
 }
 
 // ── Movement ──────────────────────────────────────────────
