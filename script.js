@@ -796,8 +796,9 @@ function updateScores() {
 }
 
 function updateStatus(text) {
-  if (text) { statusEl.textContent = text; return; }
+  if (text) { statusEl.hidden = false; statusEl.textContent = text; return; }
   if (gameOver) return;
+  statusEl.hidden = false;
   const hint = ("ontouchstart" in window) ? "Drag anywhere to move" : "Arrow keys or WASD to move";
   statusEl.textContent = isMultiplayer ? "Eat dots! Power up to eat opponent." : hint;
 }
@@ -819,7 +820,7 @@ function showWinner() {
   }
   winnerName.textContent = name;
   winnerEmoji.textContent = emoji;
-  statusEl.textContent = "Game Over – " + (lastWinnerPlayer === 0 ? "Tie!" : name + " wins!");
+  statusEl.hidden = true;
   if (isMultiplayer) syncRematchUi();
   else {
     winnerBtn.textContent = "Play Again";
