@@ -339,6 +339,21 @@ function eatAt(p) {
   if (totalDots <= 0) endGame();
 }
 
+// Remove a dot/pellet the opponent is standing on, WITHOUT awarding score.
+// Score arrives authoritatively via "pos"/"eat" messages; this only keeps the
+// grid in sync from the opponent's position so a dropped "eat" realtime message
+// can't leave a phantom dot behind (which would desync the game-over check).
+function clearDotUnder(p) {
+  const tx = Math.round(p.x);
+  const ty = Math.round(p.y);
+  const c = grid[ty] && grid[ty][tx];
+  if (c !== "." && c !== "o") return;
+  grid[ty][tx] = " ";
+  totalDots--;
+  updateScores();
+  if (totalDots <= 0) endGame();
+}
+
 // Substep movement: never advances past a tile center in a single sub-step,
 // so wall-stop and direction changes fire exactly at each center even when
 // dt is large (tab switch, lag, etc.). Prevents wall-clipping.
@@ -441,6 +456,12 @@ function startLoop() {
       step(pacmen[2], dt);
       if (!isMultiplayer) botThink(pacmen[2], dt);
       checkCollision();
+      // Reconcile dots from the opponent's position so a lost "eat" message
+      // can't leave phantom dots and desync the totalDots / game-over check.
+      if (isMultiplayer && !gameOver) {
+        const opp = pacmen[myPlayer === 1 ? 2 : 1];
+        if (opp.dead <= 0) clearDotUnder(opp);
+      }
       // periodic position broadcast
       if (isMultiplayer) maybeBroadcastPos(now);
     }
