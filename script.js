@@ -205,6 +205,8 @@ function resetGame(keepMaze) {
   for (let i = 1; i <= 2; i++) {
     pacmen[i].dir = {dx:0, dy:0};
     pacmen[i].nextDir = {dx:0, dy:0};
+    pacmen[i].want = {hx:0, vy:0};
+    pacmen[i].stopAtNext = false;
     pacmen[i].score = 0;
     pacmen[i].powered = 0;
     pacmen[i].dead = 0;
@@ -354,6 +356,26 @@ function clearDotUnder(p) {
   if (totalDots <= 0) endGame();
 }
 
+// Diagonal-intent steering for the locally-controlled pac. `want` may hold BOTH
+// a horizontal (hx) and vertical (vy) component (e.g. drag up-right). At each
+// tile center we turn onto whichever desired axis just opened up — preferring
+// the axis perpendicular to current motion so the pac zig-zags toward the
+// diagonal target ("going right, turn up when up opens; going up, turn right
+// when right opens"). Returns the chosen heading, or null when there's no
+// active intent (opponent / bot pacs have no `want`, so they fall back to the
+// nextDir mechanism untouched).
+function chooseTurn(p) {
+  const w = p.want;
+  if (!w || (!w.hx && !w.vy)) return null;
+  const horiz = w.hx ? { dx: w.hx, dy: 0 } : null;
+  const vert  = w.vy ? { dx: 0, dy: w.vy } : null;
+  // moving vertically → try to turn horizontal first; otherwise try vertical first
+  const pref = (p.dir.dy !== 0) ? [horiz, vert] : [vert, horiz];
+  for (const c of pref) if (c && canMove(p, c.dx, c.dy)) return c;
+  // no desired turn available here → keep current heading (re-checked next center)
+  return (p.dir.dx || p.dir.dy) ? { dx: p.dir.dx, dy: p.dir.dy } : null;
+}
+
 // Substep movement: never advances past a tile center in a single sub-step,
 // so wall-stop and direction changes fire exactly at each center even when
 // dt is large (tab switch, lag, etc.). Prevents wall-clipping.
@@ -383,8 +405,13 @@ function step(p, dt) {
 
     if (atCenter) {
       p.x = tx; p.y = ty;
-      // apply buffered direction if it doesn't lead into a wall
-      if ((p.nextDir.dx || p.nextDir.dy) && canMove(p, p.nextDir.dx, p.nextDir.dy)) {
+      // diagonal-intent steering takes priority for the controlled pac…
+      const turn = chooseTurn(p);
+      if (turn && canMove(p, turn.dx, turn.dy)) {
+        p.dir = { dx: turn.dx, dy: turn.dy };
+        p.facing = { dx: p.dir.dx, dy: p.dir.dy };
+      // …otherwise apply the single buffered direction (opponent / bot / keyboard)
+      } else if ((p.nextDir.dx || p.nextDir.dy) && canMove(p, p.nextDir.dx, p.nextDir.dy)) {
         p.dir = { dx: p.nextDir.dx, dy: p.nextDir.dy };
         p.facing = { dx: p.dir.dx, dy: p.dir.dy };
       } else if (p.stopAtNext) {
@@ -480,8 +507,13 @@ function setMyDir(dx, dy) {
   if (gameOver) return;
   const me = isMultiplayer ? myPlayer : 1;
   if (!me) return;
-  pacmen[me].nextDir = { dx, dy };
-  pacmen[me].stopAtNext = false;
+  const p = pacmen[me];
+  // `want` may carry both axes (diagonal drag) — chooseTurn() resolves it to a
+  // legal heading at each tile center.
+  p.want = { hx: dx, vy: dy };
+  p.stopAtNext = false;
+  // single-axis representative for the opponent-facing broadcast / buffered turn
+  p.nextDir = dx ? { dx, dy: 0 } : { dx: 0, dy };
 }
 
 // Touch: lifting the finger halts the pac at the next tile center (instead of
@@ -490,8 +522,10 @@ function stopMyPac() {
   if (gameOver) return;
   const me = isMultiplayer ? myPlayer : 1;
   if (!me) return;
-  pacmen[me].nextDir = { dx: 0, dy: 0 };
-  pacmen[me].stopAtNext = true;
+  const p = pacmen[me];
+  p.want = { hx: 0, vy: 0 };
+  p.nextDir = { dx: 0, dy: 0 };
+  p.stopAtNext = true;
 }
 
 document.addEventListener("keydown", (e) => {
@@ -527,12 +561,13 @@ canvas.addEventListener("touchmove", (e) => {
     if (t.identifier !== joyTouchId) continue;
     const dx = t.clientX - joyOrigin.x;
     const dy = t.clientY - joyOrigin.y;
-    if (Math.hypot(dx, dy) < JOY_DEAD) return;
-    if (Math.abs(dx) > Math.abs(dy)) setMyDir(dx > 0 ? 1 : -1, 0);
-    else                              setMyDir(0, dy > 0 ? 1 : -1);
-    // re-anchor so the next direction change kicks in after a fresh drag,
-    // not the cumulative distance from the original touch point
-    joyOrigin = { x: t.clientX, y: t.clientY };
+    // Per-axis intent: a diagonal drag arms BOTH axes, so the pac steers toward
+    // whichever turn opens first. Keep the origin fixed (no re-anchor) so the
+    // offset keeps expressing the diagonal; bring an axis back inside the
+    // deadzone to drop that component and aim along a single axis again.
+    const hx = Math.abs(dx) > JOY_DEAD ? (dx > 0 ? 1 : -1) : 0;
+    const vy = Math.abs(dy) > JOY_DEAD ? (dy > 0 ? 1 : -1) : 0;
+    if (hx || vy) setMyDir(hx, vy);
     e.preventDefault();
     break;
   }
