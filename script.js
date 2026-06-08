@@ -387,6 +387,10 @@ function step(p, dt) {
       if ((p.nextDir.dx || p.nextDir.dy) && canMove(p, p.nextDir.dx, p.nextDir.dy)) {
         p.dir = { dx: p.nextDir.dx, dy: p.nextDir.dy };
         p.facing = { dx: p.dir.dx, dy: p.dir.dy };
+      } else if (p.stopAtNext) {
+        // finger lifted (touch) → halt at this center, keeping grid alignment
+        p.dir = { dx: 0, dy: 0 };
+        p.stopAtNext = false;
       }
       // stop if current direction is blocked by a wall
       if (!canMove(p, p.dir.dx, p.dir.dy)) {
@@ -477,6 +481,17 @@ function setMyDir(dx, dy) {
   const me = isMultiplayer ? myPlayer : 1;
   if (!me) return;
   pacmen[me].nextDir = { dx, dy };
+  pacmen[me].stopAtNext = false;
+}
+
+// Touch: lifting the finger halts the pac at the next tile center (instead of
+// coasting forever in the last-dragged direction).
+function stopMyPac() {
+  if (gameOver) return;
+  const me = isMultiplayer ? myPlayer : 1;
+  if (!me) return;
+  pacmen[me].nextDir = { dx: 0, dy: 0 };
+  pacmen[me].stopAtNext = true;
 }
 
 document.addEventListener("keydown", (e) => {
@@ -528,6 +543,7 @@ function endTouch(e) {
     if (t.identifier === joyTouchId) {
       joyOrigin = null;
       joyTouchId = null;
+      stopMyPac();
       break;
     }
   }
