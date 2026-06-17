@@ -149,6 +149,104 @@ let lastSequence = 0;
 let rematchRequested = false;
 let rematchState = "idle";
 
+// ── Usion capabilities: cloud stats · leaderboard · notify · checkpoint ──
+// All wrappers are defensive: missing modules / standalone preview must never
+// throw (a thrown error in init blanks the game). They no-op gracefully.
+// Pac-Man is score-based (eat dots) and real-time (no turns) → no "Your turn".
+
+let myStats = { bestScore: 0, wins: 0, losses: 0, games: 0 };
+let statsRecordedThisGame = false;
+const STATS_KEY = "pacman:stats";
+
+function isHostPlayer() {
+  return isMultiplayer && Array.isArray(players) && players.length > 0
+    && players.slice().sort()[0] === myId;
+}
+
+// Cross-device stats: prefer Cloud KV, fall back to localStorage cache.
+async function loadStats() {
+  try {
+    if (window.Usion && Usion.cloud) {
+      const remote = await Usion.cloud.get(STATS_KEY);
+      if (remote && typeof remote === "object") {
+        myStats = Object.assign(myStats, remote);
+        try { localStorage.setItem(STATS_KEY, JSON.stringify(myStats)); } catch (_) {}
+        return;
+      }
+    }
+  } catch (_) {}
+  try {
+    const raw = localStorage.getItem(STATS_KEY);
+    if (raw) myStats = Object.assign(myStats, JSON.parse(raw));
+  } catch (_) {}
+}
+
+function persistStats() {
+  try { localStorage.setItem(STATS_KEY, JSON.stringify(myStats)); } catch (_) {}
+  try { if (window.Usion && Usion.cloud) Usion.cloud.set(STATS_KEY, myStats); } catch (_) {}
+}
+
+function submitLeaderboard() {
+  try {
+    if (window.Usion && Usion.leaderboard) {
+      // Score = personal best score; ranked highest-first.
+      Usion.leaderboard.submit(myStats.bestScore, { games: myStats.games });
+    }
+  } catch (_) {}
+}
+
+function notifySelf(title, body) {
+  // Only fires when the app is backgrounded (banner if online elsewhere, OS push if offline).
+  try { if (window.Usion && Usion.notify && document.hidden) Usion.notify.send({ title, body }); } catch (_) {}
+}
+
+// Record MY outcome exactly once per game (idempotent across replay/dup events).
+// bestScore is tracked for ALL runs; win/loss/games only for multiplayer.
+function recordOutcome(winnerPlayer) {
+  if (statsRecordedThisGame) return;
+  statsRecordedThisGame = true;
+  const myScore = (myPlayer && pacmen[myPlayer]) ? pacmen[myPlayer].score : 0;
+  if (myScore > myStats.bestScore) myStats.bestScore = myScore;
+  if (isMultiplayer) {
+    myStats.games += 1;
+    if (winnerPlayer && winnerPlayer === myPlayer) {
+      myStats.wins += 1;
+      notifySelf("You won! 🎉", "You won your Pac-Man match");
+    } else if (winnerPlayer) {
+      myStats.losses += 1;
+      notifySelf("Match over", "Your Pac-Man match ended");
+    } else {
+      notifySelf("Match over", "Your Pac-Man match ended in a tie");
+    }
+    try { if (window.Usion && Usion.cloud && Usion.cloud.shared) Usion.cloud.shared.incr("games_total", 1); } catch (_) {}
+  }
+  persistStats();
+  submitLeaderboard();
+}
+
+// Host (sorted playerIds[0]) checkpoints authoritative state so reconnecting
+// clients can load it. Defensive + host-only; never destabilizes pos/eat sync.
+function getCheckpointState() {
+  return {
+    mazeIndex,
+    grid: grid.map((row) => row.slice()),
+    totalDots,
+    gameOver,
+    lastWinnerPlayer,
+    pacmen: pacmen.map((p) => p ? {
+      x: p.x, y: p.y, score: p.score, powered: p.powered, dead: p.dead,
+    } : null),
+    version: Date.now(),
+  };
+}
+
+function hostCheckpoint() {
+  if (!isHostPlayer()) return;
+  try {
+    if (window.Usion && Usion.game && Usion.game.setState) Usion.game.setState(getCheckpointState());
+  } catch (_) {}
+}
+
 // ── DOM ───────────────────────────────────────────────────
 const canvas       = document.getElementById("board");
 const ctx          = canvas.getContext("2d");
@@ -215,6 +313,7 @@ function resetGame(keepMaze) {
   lastWinnerPlayer = 0;
   rematchState = "idle";
   rematchRequested = false;
+  statsRecordedThisGame = false;
   hideBanner();
   updateScores();
   updateStatus();
@@ -471,6 +570,8 @@ function endGame() {
   if (s1 > s2) lastWinnerPlayer = 1;
   else if (s2 > s1) lastWinnerPlayer = 2;
   else lastWinnerPlayer = 0;
+  recordOutcome(lastWinnerPlayer);
+  hostCheckpoint();
   showWinner();
 }
 
@@ -495,6 +596,8 @@ function startLoop() {
       }
       // periodic position broadcast
       if (isMultiplayer) maybeBroadcastPos(now);
+      // host periodically checkpoints authoritative state for reconnecting clients
+      if (isMultiplayer) maybeHostCheckpoint(now);
     }
     draw();
     rafId = requestAnimationFrame(frame);
@@ -646,6 +749,14 @@ function pickBotTarget(p) {
 }
 
 // ── Multiplayer ───────────────────────────────────────────
+let lastHostCheckpoint = 0;
+function maybeHostCheckpoint(now) {
+  if (!isHostPlayer()) return;
+  if (now - lastHostCheckpoint < 1000) return; // throttle to ~1/sec
+  lastHostCheckpoint = now;
+  hostCheckpoint();
+}
+
 let lastPosBroadcast = 0;
 function maybeBroadcastPos(now) {
   if (now - lastPosBroadcast < 80) return;
@@ -667,6 +778,7 @@ Usion.init(async function(config) {
   myId = config.userId;
   playerNames[myId] = config.userName || "You";
   if (config.userAvatar) playerAvatars[myId] = config.userAvatar;
+  loadStats(); // fire-and-forget; never block init/render
 
   if (config.roomId) {
     showWaiting();
@@ -684,6 +796,7 @@ setTimeout(() => {
   bootedStandalone = true;
   myId = "local-" + Math.random().toString(36).slice(2, 8);
   playerNames[myId] = "You";
+  loadStats(); // fire-and-forget; never block init/render
   setupBotMode();
 }, 600);
 
@@ -694,7 +807,10 @@ async function setupMultiplayer(roomId) {
     Usion.game.onPlayerJoined(onPlayerJoined);
     Usion.game.onPlayerLeft(() => {
       connectedCount = Math.max(0, connectedCount - 1);
-      if (!gameOver) updateStatus("Opponent left");
+      if (!gameOver) {
+        updateStatus("Opponent left");
+        notifySelf("Opponent left", "Your opponent left the Pac-Man match");
+      }
     });
     Usion.game.onAction(() => {});
     Usion.game.onSync(() => {});
