@@ -148,6 +148,10 @@ let connectedCount = 0;
 let lastSequence = 0;
 let rematchRequested = false;
 let rematchState = "idle";
+let netPaused = false;          // true while disconnected → freeze movement/broadcast until resync
+let forfeitTimer = null;        // grace countdown after an opponent leaves
+const FORFEIT_GRACE_MS = 20000;
+let rosterFromConfig = false;   // canonical roster came from config.playerIds (never reorder it)
 
 // ── Usion capabilities: cloud stats · leaderboard · notify · checkpoint ──
 // All wrappers are defensive: missing modules / standalone preview must never
@@ -228,8 +232,9 @@ function recordOutcome(winnerPlayer) {
 // clients can load it. Defensive + host-only; never destabilizes pos/eat sync.
 function getCheckpointState() {
   return {
+    order: players.slice(),                 // canonical roster (seat order)
     mazeIndex,
-    grid: grid.map((row) => row.slice()),
+    grid: grid.map((row) => row.join("")),  // compact rows (re-split on apply)
     totalDots,
     gameOver,
     lastWinnerPlayer,
@@ -245,6 +250,151 @@ function hostCheckpoint() {
   try {
     if (window.Usion && Usion.game && Usion.game.setState) Usion.game.setState(getCheckpointState());
   } catch (_) {}
+}
+
+// Restore the shared maze + dots-eaten grid from a host snapshot (checkpoint or
+// live fullsync). Rows may be packed strings ("#o..") or arrays.
+function applyGridFromSnap(snap) {
+  if (typeof snap.mazeIndex === "number") mazeIndex = snap.mazeIndex;
+  if (Array.isArray(snap.grid)) {
+    grid = snap.grid.map((row) => (typeof row === "string" ? row.split("") : row.slice()));
+  }
+  if (typeof snap.totalDots === "number") totalDots = snap.totalDots;
+}
+
+// Full restore from a host checkpoint (join ack / onSync game_state). Promotes a
+// blank or late client straight into the live online match. Returns true if a
+// valid checkpoint was applied. This is the reconnect recovery path — it does
+// NOT call resetGame() (which would wipe the dots-eaten grid).
+function applyCheckpoint(state) {
+  if (!state || typeof state !== "object" || !Array.isArray(state.pacmen)) return false;
+  if (Array.isArray(state.order) && state.order.length) players = state.order.slice();
+  if (!players || players.length < 2) return false;
+  const mp = players.indexOf(myId) + 1;
+  if (mp < 1) return false; // not a seated player in this checkpoint
+
+  myPlayer = mp;
+  isMultiplayer = true;
+  waitingForOpponent = false;
+  netPaused = false;
+  hideWaiting();
+  if (diffSelect) diffSelect.style.display = "none";
+
+  applyGridFromSnap(state);
+  for (let i = 1; i <= 2; i++) {
+    const sp = state.pacmen[i];
+    if (!sp) continue;
+    const p = pacmen[i];
+    p.x = sp.x; p.y = sp.y;
+    p.score = sp.score || 0;
+    p.powered = sp.powered || 0;
+    p.dead = sp.dead || 0;
+    p.dir = { dx: 0, dy: 0 };
+    p.nextDir = { dx: 0, dy: 0 };
+    p.want = { hx: 0, vy: 0 };
+    p.stopAtNext = false;
+  }
+  gameOver = !!state.gameOver;
+  lastWinnerPlayer = state.lastWinnerPlayer || 0;
+  statsRecordedThisGame = false;
+
+  updatePanels();
+  updateScores();
+  if (gameOver) {
+    recordOutcome(lastWinnerPlayer);
+    showWinner();
+  } else {
+    hideBanner();
+    updateStatus();
+  }
+  if (!rafId) startLoop();
+  return true;
+}
+
+// Live grid/opponent refresh pushed by the host after a peer asks for state.
+// Unlike applyCheckpoint this does NOT touch MY own pac (I'm authoritative over
+// it) — it only refreshes the shared dots grid and the opponent's position so a
+// rejoiner's stale checkpoint grid catches up to the latest.
+function applyFullSync(snap) {
+  if (!snap) return;
+  applyGridFromSnap(snap);
+  const opp = myPlayer === 1 ? 2 : 1;
+  if (Array.isArray(snap.pacmen) && snap.pacmen[opp]) {
+    const sp = snap.pacmen[opp];
+    const p = pacmen[opp];
+    p.x = sp.x; p.y = sp.y;
+    p.score = sp.score || 0;
+    p.powered = sp.powered || 0;
+    p.dead = sp.dead || 0;
+  }
+  updateScores();
+  if (totalDots <= 0 && !gameOver) endGame();
+}
+
+// Host answers a rejoiner's request_state with the freshest authoritative grid
+// + both pac positions over realtime, so the dots eaten since the last ~1s
+// checkpoint are reconciled immediately.
+function broadcastFullSync() {
+  if (!isHostPlayer()) return;
+  try {
+    Usion.game.realtime("fullsync", {
+      mazeIndex,
+      grid: grid.map((r) => r.join("")),
+      totalDots,
+      gameOver,
+      lastWinnerPlayer,
+      pacmen: pacmen.map((p) => p ? {
+        x: p.x, y: p.y, score: p.score, powered: p.powered, dead: p.dead,
+      } : null),
+      order: players.slice(),
+    });
+  } catch (_) {}
+}
+
+// ── Forfeit grace (opponent left) ─────────────────────────
+// Mirror the 13 / mini_golf / table_soccer model: a player who drops mid-match
+// has FORFEIT_GRACE_MS to return before the remaining player wins. Movement is
+// frozen (netPaused-style) while the timer runs.
+function clearForfeitGrace() {
+  if (forfeitTimer) { clearInterval(forfeitTimer); forfeitTimer = null; }
+}
+
+function startForfeitGrace() {
+  if (!isMultiplayer || gameOver) return;
+  clearForfeitGrace();
+  let secs = Math.ceil(FORFEIT_GRACE_MS / 1000);
+  updateStatus("Opponent left — waiting to rejoin… (" + secs + "s)");
+  forfeitTimer = setInterval(() => {
+    if (gameOver || connectedCount > 1) { clearForfeitGrace(); updateStatus(); return; }
+    secs -= 1;
+    if (secs > 0) {
+      updateStatus("Opponent left — waiting to rejoin… (" + secs + "s)");
+      return;
+    }
+    clearForfeitGrace();
+    if (!gameOver && connectedCount <= 1) forfeitWin();
+  }, 1000);
+}
+
+// A peer is back → cancel the pending forfeit and pull fresh state.
+function resumeFromGrace() {
+  if (!forfeitTimer) return;
+  clearForfeitGrace();
+  connectedCount = Math.max(connectedCount, 2);
+  updateStatus();
+  try { Usion.game.requestSync(0); } catch (_) {}
+  try { Usion.game.realtime("request_state", {}); } catch (_) {}
+}
+
+// Remaining player wins by forfeit, regardless of the running score.
+function forfeitWin() {
+  clearForfeitGrace();
+  if (gameOver) return;
+  gameOver = true;
+  lastWinnerPlayer = myPlayer || 1;
+  recordOutcome(lastWinnerPlayer);
+  hostCheckpoint();
+  showWinner();
 }
 
 // ── DOM ───────────────────────────────────────────────────
@@ -583,7 +733,9 @@ function startLoop() {
     lastTick = now;
     animMouth = (animMouth + dt * 4) % 1;
 
-    if (!gameOver) {
+    // Freeze simulation while disconnected (netPaused) or while a forfeit grace
+    // countdown is running — a stalled client must not drift ahead of its peer.
+    if (!gameOver && !netPaused && !forfeitTimer) {
       step(pacmen[1], dt);
       step(pacmen[2], dt);
       if (!isMultiplayer) botThink(pacmen[2], dt);
@@ -760,7 +912,12 @@ function maybeHostCheckpoint(now) {
 let lastPosBroadcast = 0;
 function maybeBroadcastPos(now) {
   if (now - lastPosBroadcast < 80) return;
-  lastPosBroadcast = now;
+  broadcastPosNow(now);
+}
+
+function broadcastPosNow(now) {
+  if (!isMultiplayer || !myPlayer) return;
+  lastPosBroadcast = now || performance.now();
   const me = pacmen[myPlayer];
   Usion.game.realtime("pos", {
     x: me.x, y: me.y,
@@ -778,6 +935,12 @@ Usion.init(async function(config) {
   myId = config.userId;
   playerNames[myId] = config.userName || "You";
   if (config.userAvatar) playerAvatars[myId] = config.userAvatar;
+  // Canonical platform roster (playerIds[0] = host). Seed seating from it so both
+  // clients agree on player 1 vs 2 (spawn/color) regardless of join-ack order.
+  if (config.playerIds && config.playerIds.length) {
+    players = config.playerIds.slice();
+    rosterFromConfig = true;
+  }
   loadStats(); // fire-and-forget; never block init/render
 
   if (config.roomId) {
@@ -805,20 +968,28 @@ async function setupMultiplayer(roomId) {
     await Usion.game.connect();
     Usion.game.onJoined(onJoined);
     Usion.game.onPlayerJoined(onPlayerJoined);
-    Usion.game.onPlayerLeft(() => {
-      connectedCount = Math.max(0, connectedCount - 1);
-      if (!gameOver) {
-        updateStatus("Opponent left");
-        notifySelf("Opponent left", "Your opponent left the Pac-Man match");
-      }
-    });
+    Usion.game.onPlayerLeft(onPlayerLeft);
     Usion.game.onAction(() => {});
-    Usion.game.onSync(() => {});
+    Usion.game.onSync(onSync);
     Usion.game.onRealtime(onRealtime);
     Usion.game.onRematchRequest(onRematchRequest);
     Usion.game.onGameRestarted(onGameRestarted);
-    Usion.game.onDisconnect(() => { if (!gameOver) updateStatus("Disconnected…"); });
-    Usion.game.onReconnect(() => { if (!gameOver) updateStatus(); });
+    Usion.game.onDisconnect(() => {
+      if (!isMultiplayer || gameOver) return;
+      // Real pause: freeze movement/broadcast so a disconnected client can't
+      // drift ahead. Resync on return restores the authoritative grid + scores.
+      netPaused = true;
+      updateStatus("Connection lost — paused…");
+    });
+    Usion.game.onReconnect(() => {
+      netPaused = false;
+      if (gameOver) return;
+      updateStatus();
+      // Pull the host checkpoint (game_state) AND ask peers for the live grid +
+      // positions so dots eaten while we were away are reconciled.
+      try { Usion.game.requestSync(0); } catch (_) {}
+      try { Usion.game.realtime("request_state", {}); } catch (_) {}
+    });
     await Usion.game.join(roomId);
   } catch (err) {
     console.error("MP setup failed:", err);
@@ -827,21 +998,30 @@ async function setupMultiplayer(roomId) {
 }
 
 function onJoined(data) {
-  players = data.player_ids || [];
+  // Keep the canonical roster from config.playerIds; only fall back to the join
+  // ack's order if config didn't provide one (never reorder seating per-client).
+  if (!rosterFromConfig && data.player_ids) players = data.player_ids;
   connectedCount = Number(data.connected_count || 0);
   if (data.sequence !== undefined) lastSequence = data.sequence;
   Usion.game.realtime("info", {
     name: playerNames[myId],
     avatar: playerAvatars[myId] || null,
   });
+  // Reconnect: the host's checkpoint rides the join ack as game_state. Rebuild
+  // the live match from it straight away instead of sitting on the waiting card.
+  if (data.game_state && applyCheckpoint(data.game_state)) {
+    try { Usion.game.realtime("request_state", {}); } catch (_) {}
+    return;
+  }
   if (connectedCount >= 2 && waitingForOpponent) startOnline();
 }
 
 function onPlayerJoined(data) {
-  if (data.player_ids) players = data.player_ids;
+  if (!rosterFromConfig && data.player_ids) players = data.player_ids;
   if (data.player && data.player.is_connected) {
     connectedCount = Math.max(connectedCount, 2);
   }
+  if (forfeitTimer) resumeFromGrace(); // opponent came back during the grace window
   Usion.game.realtime("info", {
     name: playerNames[myId],
     avatar: playerAvatars[myId] || null,
@@ -849,8 +1029,37 @@ function onPlayerJoined(data) {
   if (connectedCount >= 2 && waitingForOpponent) startOnline();
 }
 
+function onPlayerLeft(data) {
+  if (!rosterFromConfig && data && data.player_ids) players = data.player_ids;
+  connectedCount = Math.max(0, connectedCount - 1);
+  if (gameOver) return;
+  notifySelf("Opponent left", "Your opponent left the Pac-Man match");
+  // Mid-match: give the opponent a grace window to rejoin before forfeit.
+  startForfeitGrace();
+}
+
+function onSync(data) {
+  if (data && data.sequence !== undefined) lastSequence = data.sequence;
+  // Checkpoint path: the host's setState() rides game:sync as game_state. Rebuild
+  // the live grid + scores from it (Pac-Man's live positions re-sync via "pos").
+  if (data && data.game_state) applyCheckpoint(data.game_state);
+}
+
 function onRealtime(data) {
   if (data.player_id === myId) return;
+  // Any packet from a peer proves they're connected → cancel a pending forfeit.
+  if (forfeitTimer) resumeFromGrace();
+  if (data.action_type === "request_state") {
+    // A peer rejoined and wants the live grid + positions. Host answers with the
+    // authoritative grid; everyone re-broadcasts their own pac so it syncs fast.
+    if (isHostPlayer()) broadcastFullSync();
+    if (isMultiplayer && myPlayer) broadcastPosNow();
+    return;
+  }
+  if (data.action_type === "fullsync" && data.action_data) {
+    applyFullSync(data.action_data);
+    return;
+  }
   if (data.action_type === "info") {
     if (data.action_data.name)   playerNames[data.player_id]   = data.action_data.name;
     if (data.action_data.avatar) playerAvatars[data.player_id] = data.action_data.avatar;
