@@ -104,9 +104,13 @@ function initialMazeIndex() {
   return Math.floor(Math.random() * MAZES.length);
 }
 
+// Host = config.playerIds[0] (the platform's canonical authority). `players` is
+// seeded from config.playerIds and never reordered, so players[0] is the host on
+// every client. (Do NOT sort — a lexical winner can disagree with playerIds[0],
+// which is the only client the platform lets call setState.)
 function isHost() {
   if (!isMultiplayer || players.length < 2) return true;
-  return players.slice().sort()[0] === myId;
+  return players[0] === myId;
 }
 
 // ── Game State ────────────────────────────────────────────
@@ -164,7 +168,7 @@ const STATS_KEY = "pacman:stats";
 
 function isHostPlayer() {
   return isMultiplayer && Array.isArray(players) && players.length > 0
-    && players.slice().sort()[0] === myId;
+    && players[0] === myId;
 }
 
 // Cross-device stats: prefer Cloud KV, fall back to localStorage cache.
@@ -328,7 +332,13 @@ function applyFullSync(snap) {
     p.dead = sp.dead || 0;
   }
   updateScores();
-  if (totalDots <= 0 && !gameOver) endGame();
+  // Authoritative end state from the host (recovers a lost "gameover" packet).
+  if (snap.gameOver && !gameOver) {
+    if (typeof snap.lastWinnerPlayer === "number") lastWinnerPlayer = snap.lastWinnerPlayer;
+    gameOver = true;
+    recordOutcome(lastWinnerPlayer);
+    showWinner();
+  }
 }
 
 // Host answers a rejoiner's request_state with the freshest authoritative grid
@@ -463,6 +473,7 @@ function resetGame(keepMaze) {
   lastWinnerPlayer = 0;
   rematchState = "idle";
   rematchRequested = false;
+  rematchStarting = false;
   statsRecordedThisGame = false;
   hideBanner();
   updateScores();
@@ -714,14 +725,41 @@ function checkCollision() {
   }
 }
 
+// End condition reached (all dots eaten). The WINNER must be decided
+// authoritatively by the host and broadcast — guests never crown a winner from
+// their own (possibly desynced) score copies. A guest that hits the end
+// condition locally just waits for the host's "gameover" (it also rides the
+// checkpoint/fullsync, so a lost packet recovers on the next sync).
 function endGame() {
+  if (gameOver) return;
+  if (isMultiplayer && !isHostPlayer()) return; // wait for authoritative gameover
+  finalizeGame();
+}
+
+function finalizeGame() {
+  if (gameOver) return;
   gameOver = true;
   const s1 = pacmen[1].score, s2 = pacmen[2].score;
   if (s1 > s2) lastWinnerPlayer = 1;
   else if (s2 > s1) lastWinnerPlayer = 2;
   else lastWinnerPlayer = 0;
+  if (isMultiplayer && isHostPlayer()) {
+    try { Usion.game.realtime("gameover", { winner: lastWinnerPlayer, s1, s2 }); } catch (_) {}
+  }
   recordOutcome(lastWinnerPlayer);
   hostCheckpoint();
+  showWinner();
+}
+
+// Guest applies the host's authoritative result (final scores + winner).
+function applyGameOver(d) {
+  if (gameOver || !d) return;
+  if (typeof d.s1 === "number") pacmen[1].score = d.s1;
+  if (typeof d.s2 === "number") pacmen[2].score = d.s2;
+  lastWinnerPlayer = d.winner || 0;
+  gameOver = true;
+  updateScores();
+  recordOutcome(lastWinnerPlayer);
   showWinner();
 }
 
@@ -930,7 +968,9 @@ function broadcastPosNow(now) {
 }
 
 let bootedStandalone = false;
+let initFired = false;
 Usion.init(async function(config) {
+  initFired = true;
   if (bootedStandalone) return;
   myId = config.userId;
   playerNames[myId] = config.userName || "You";
@@ -951,17 +991,22 @@ Usion.init(async function(config) {
   }
 });
 
-// Standalone fallback: if we're not embedded in a host (no INIT postMessage
-// within 600ms), boot in solo bot mode so the game works when the file is
-// opened directly.
+// Standalone fallback: if the file is opened directly (NOT embedded in the Usion
+// host), boot solo bot mode. We only auto-boot when this is a TOP-LEVEL window —
+// inside the platform iframe we must wait for init even on a slow network, or we
+// would strand a real online player in a solo bot game (config.roomId never
+// joined). `initFired` (not the undocumented Usion._initialized) gates it.
 setTimeout(() => {
-  if (Usion._initialized) return;
+  if (initFired || bootedStandalone) return;
+  let embedded = true;
+  try { embedded = window.self !== window.top; } catch (_) { embedded = true; }
+  if (embedded) return; // embedded but init is just slow — keep waiting
   bootedStandalone = true;
   myId = "local-" + Math.random().toString(36).slice(2, 8);
   playerNames[myId] = "You";
   loadStats(); // fire-and-forget; never block init/render
   setupBotMode();
-}, 600);
+}, 1500);
 
 async function setupMultiplayer(roomId) {
   try {
@@ -1060,6 +1105,10 @@ function onRealtime(data) {
     applyFullSync(data.action_data);
     return;
   }
+  if (data.action_type === "gameover" && data.action_data) {
+    applyGameOver(data.action_data);
+    return;
+  }
   if (data.action_type === "info") {
     if (data.action_data.name)   playerNames[data.player_id]   = data.action_data.name;
     if (data.action_data.avatar) playerAvatars[data.player_id] = data.action_data.avatar;
@@ -1133,7 +1182,12 @@ function onRematchRequest(data) {
 
 // Host picks the next maze, broadcasts it as "started", and resets locally.
 // Only the host runs this — guarantees both clients use the same mazeIndex.
+// Guarded so the two triggers (onRealtime "rematch" AND onRematchRequest from the
+// guest's requestRematch()) can't both fire and pick two different mazes.
+let rematchStarting = false;
 function hostStartRematch() {
+  if (rematchStarting) return;
+  rematchStarting = true;
   mazeIndex = Math.floor(Math.random() * MAZES.length);
   Usion.game.realtime("rematch", { state: "started", mazeIndex });
   resetGame(true);
