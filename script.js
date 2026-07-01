@@ -156,6 +156,8 @@ let netPaused = false;          // true while disconnected → freeze movement/b
 let forfeitTimer = null;        // grace countdown after an opponent leaves
 const FORFEIT_GRACE_MS = 20000;
 let rosterFromConfig = false;   // canonical roster came from config.playerIds (never reorder it)
+let liveOnline = false;         // true once I'm actively playing THIS online match (a socket blip keeps it true; a page reload resets it)
+let lastCheckpointVersion = 0;  // monotonic version of the last host checkpoint I applied — gates out stale/duplicate ones
 
 // ── Usion capabilities: cloud stats · leaderboard · notify · checkpoint ──
 // All wrappers are defensive: missing modules / standalone preview must never
@@ -266,16 +268,32 @@ function applyGridFromSnap(snap) {
   if (typeof snap.totalDots === "number") totalDots = snap.totalDots;
 }
 
-// Full restore from a host checkpoint (join ack / onSync game_state). Promotes a
-// blank or late client straight into the live online match. Returns true if a
-// valid checkpoint was applied. This is the reconnect recovery path — it does
-// NOT call resetGame() (which would wipe the dots-eaten grid).
-function applyCheckpoint(state) {
+// Apply a host checkpoint (setState) that arrived on a join ack / game:sync.
+// Returns true if a valid checkpoint was applied. Does NOT call resetGame()
+// (which would wipe the dots-eaten grid). Two cases, distinguished by
+// `liveOnline`:
+//
+//   • FRESH (page reload / first (re)join): we have no trustworthy local pac, so
+//     restore EVERYTHING from the checkpoint — including our own pac — and go
+//     live. This promotes a blank client straight into the live match.
+//   • ALREADY LIVE (socket blip, forfeit-grace resume, or a stray sync during
+//     play): we are the sole authority over our own pac, so a ~1s-old checkpoint
+//     must NOT rewind it. Refresh only the shared dots grid, the opponent's pac,
+//     scores, and end-state — then re-assert our own position to peers. (Mirrors
+//     applyFullSync, which likewise never touches our own pac.)
+//
+// Version-gated: an out-of-order or duplicate checkpoint (version <= the last one
+// applied) is ignored, so a late packet can't clobber newer state.
+function reconcileCheckpoint(state) {
   if (!state || typeof state !== "object" || !Array.isArray(state.pacmen)) return false;
+  if (typeof state.version === "number" && state.version <= lastCheckpointVersion) return false;
   if (Array.isArray(state.order) && state.order.length) players = state.order.slice();
   if (!players || players.length < 2) return false;
   const mp = players.indexOf(myId) + 1;
   if (mp < 1) return false; // not a seated player in this checkpoint
+
+  if (typeof state.version === "number") lastCheckpointVersion = state.version;
+  const fresh = !liveOnline;
 
   myPlayer = mp;
   isMultiplayer = true;
@@ -288,6 +306,8 @@ function applyCheckpoint(state) {
   for (let i = 1; i <= 2; i++) {
     const sp = state.pacmen[i];
     if (!sp) continue;
+    // Once we're live, never rewind our own authoritative pac from a stale checkpoint.
+    if (!fresh && i === myPlayer) continue;
     const p = pacmen[i];
     p.x = sp.x; p.y = sp.y;
     p.score = sp.score || 0;
@@ -300,7 +320,10 @@ function applyCheckpoint(state) {
   }
   gameOver = !!state.gameOver;
   lastWinnerPlayer = state.lastWinnerPlayer || 0;
-  statsRecordedThisGame = false;
+  // Keep the idempotency guard intact when the match is already over (avoid
+  // double-recording); only re-arm it for a still-running game.
+  if (!gameOver) statsRecordedThisGame = false;
+  liveOnline = true;
 
   updatePanels();
   updateScores();
@@ -312,11 +335,14 @@ function applyCheckpoint(state) {
     updateStatus();
   }
   if (!rafId) startLoop();
+  // Re-assert our own position so peers reconcile us (esp. after a live blip,
+  // where we skipped our own pac above).
+  if (!gameOver && myPlayer) broadcastPosNow();
   return true;
 }
 
 // Live grid/opponent refresh pushed by the host after a peer asks for state.
-// Unlike applyCheckpoint this does NOT touch MY own pac (I'm authoritative over
+// Like a live-blip reconcileCheckpoint this does NOT touch MY own pac (I'm authoritative over
 // it) — it only refreshes the shared dots grid and the opponent's position so a
 // rejoiner's stale checkpoint grid catches up to the latest.
 function applyFullSync(snap) {
@@ -471,6 +497,7 @@ function resetGame(keepMaze) {
   }
   gameOver = false;
   lastWinnerPlayer = 0;
+  lastCheckpointVersion = 0;   // new match → old checkpoints must not gate the new ones
   rematchState = "idle";
   rematchRequested = false;
   rematchStarting = false;
@@ -1054,7 +1081,7 @@ function onJoined(data) {
   });
   // Reconnect: the host's checkpoint rides the join ack as game_state. Rebuild
   // the live match from it straight away instead of sitting on the waiting card.
-  if (data.game_state && applyCheckpoint(data.game_state)) {
+  if (data.game_state && reconcileCheckpoint(data.game_state)) {
     try { Usion.game.realtime("request_state", {}); } catch (_) {}
     return;
   }
@@ -1087,7 +1114,7 @@ function onSync(data) {
   if (data && data.sequence !== undefined) lastSequence = data.sequence;
   // Checkpoint path: the host's setState() rides game:sync as game_state. Rebuild
   // the live grid + scores from it (Pac-Man's live positions re-sync via "pos").
-  if (data && data.game_state) applyCheckpoint(data.game_state);
+  if (data && data.game_state) reconcileCheckpoint(data.game_state);
 }
 
 function onRealtime(data) {
@@ -1199,6 +1226,7 @@ function onGameRestarted() {
 
 function startOnline() {
   isMultiplayer = true;
+  liveOnline = true;
   waitingForOpponent = false;
   myPlayer = players.indexOf(myId) + 1;
   hideWaiting();
