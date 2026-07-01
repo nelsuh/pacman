@@ -157,6 +157,7 @@ let forfeitTimer = null;        // grace countdown after an opponent leaves
 const FORFEIT_GRACE_MS = 20000;
 let rosterFromConfig = false;   // canonical roster came from config.playerIds (never reorder it)
 let liveOnline = false;         // true once I'm actively playing THIS online match (a socket blip keeps it true; a page reload resets it)
+let resyncPending = false;      // true from tab-return until an authoritative snapshot lands → freeze so we can't re-eat already-eaten dots
 let lastCheckpointVersion = 0;  // monotonic version of the last host checkpoint I applied — gates out stale/duplicate ones
 
 // ── Usion capabilities: cloud stats · leaderboard · notify · checkpoint ──
@@ -268,6 +269,42 @@ function applyGridFromSnap(snap) {
   if (typeof snap.totalDots === "number") totalDots = snap.totalDots;
 }
 
+// Recompute totalDots from the grid (source of truth after any merge) and
+// re-run the end-game check. Repairs any totalDots drift from dropped packets.
+function recountDots() {
+  let n = 0;
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++) {
+      const c = grid[y][x];
+      if (c === "." || c === "o") n++;
+    }
+  totalDots = n;
+  updateScores();
+  if (!gameOver && totalDots <= 0) endGame();
+}
+
+// UNION-merge eaten cells from a peer's grid into ours. Dots only ever transition
+// dot→empty on a shared maze, so a cell empty on EITHER side is genuinely eaten —
+// merging is order-independent and self-heals dropped "eat" packets no matter who
+// missed them (the fix for: background the tab, opponent eats, come back and the
+// dots are still there to re-eat). Never RESTORES a dot we already ate.
+function mergeEatenFromRows(rows) {
+  if (!Array.isArray(rows)) return;
+  let changed = false;
+  for (let y = 0; y < ROWS && y < rows.length; y++) {
+    const rr = rows[y];
+    if (!rr) continue;
+    for (let x = 0; x < COLS && x < rr.length; x++) {
+      // peer shows this cell eaten (empty) but we still have a dot → adopt the eat
+      if (rr[x] === " " && grid[y] && (grid[y][x] === "." || grid[y][x] === "o")) {
+        grid[y][x] = " ";
+        changed = true;
+      }
+    }
+  }
+  if (changed) recountDots();
+}
+
 // Apply a host checkpoint (setState) that arrived on a join ack / game:sync.
 // Returns true if a valid checkpoint was applied. Does NOT call resetGame()
 // (which would wipe the dots-eaten grid). Two cases, distinguished by
@@ -299,10 +336,17 @@ function reconcileCheckpoint(state) {
   isMultiplayer = true;
   waitingForOpponent = false;
   netPaused = false;
+  resyncPending = false;   // an authoritative snapshot arrived → resume play
   hideWaiting();
   if (diffSelect) diffSelect.style.display = "none";
 
-  applyGridFromSnap(state);
+  // Fresh reload → trust the checkpoint grid wholesale. Already-live → the peer's
+  // grid may LAG ours (dots we ate it hasn't seen), so union-merge eaten cells
+  // instead of replacing, which would wrongly restore dots we already ate.
+  if (fresh) applyGridFromSnap(state);
+  else if (typeof state.mazeIndex !== "number" || state.mazeIndex === mazeIndex) {
+    mergeEatenFromRows(state.grid);
+  }
   for (let i = 1; i <= 2; i++) {
     const sp = state.pacmen[i];
     if (!sp) continue;
@@ -347,7 +391,12 @@ function reconcileCheckpoint(state) {
 // rejoiner's stale checkpoint grid catches up to the latest.
 function applyFullSync(snap) {
   if (!snap) return;
-  applyGridFromSnap(snap);
+  resyncPending = false;   // a peer answered our state request → resume play
+  // Union-merge eaten cells (never replace) so a host grid that missed dots WE
+  // ate doesn't restore them; recountDots repairs any totalDots drift.
+  if (typeof snap.mazeIndex !== "number" || snap.mazeIndex === mazeIndex) {
+    mergeEatenFromRows(snap.grid);
+  }
   const opp = myPlayer === 1 ? 2 : 1;
   if (Array.isArray(snap.pacmen) && snap.pacmen[opp]) {
     const sp = snap.pacmen[opp];
@@ -384,6 +433,16 @@ function broadcastFullSync() {
       } : null),
       order: players.slice(),
     });
+  } catch (_) {}
+}
+
+// Everyone (host AND guest) can share their eaten-cells grid so the peer can
+// union-merge it. This is what heals dots the OPPONENT ate while I was
+// backgrounded — and, symmetrically, dots I ate that the opponent missed.
+function broadcastGridSync() {
+  if (!isMultiplayer) return;
+  try {
+    Usion.game.realtime("gridsync", { mazeIndex, grid: grid.map((r) => r.join("")) });
   } catch (_) {}
 }
 
@@ -798,9 +857,11 @@ function startLoop() {
     lastTick = now;
     animMouth = (animMouth + dt * 4) % 1;
 
-    // Freeze simulation while disconnected (netPaused) or while a forfeit grace
-    // countdown is running — a stalled client must not drift ahead of its peer.
-    if (!gameOver && !netPaused && !forfeitTimer) {
+    // Freeze simulation while disconnected (netPaused), while a forfeit grace
+    // countdown runs, or while a tab-return resync is pending (resyncPending) —
+    // a stalled client must not drift ahead of its peer, and must not move/eat
+    // before reconciling (else it re-eats dots the opponent already ate).
+    if (!gameOver && !netPaused && !forfeitTimer && !resyncPending) {
       step(pacmen[1], dt);
       step(pacmen[2], dt);
       if (!isMultiplayer) botThink(pacmen[2], dt);
@@ -815,6 +876,8 @@ function startLoop() {
       if (isMultiplayer) maybeBroadcastPos(now);
       // host periodically checkpoints authoritative state for reconnecting clients
       if (isMultiplayer) maybeHostCheckpoint(now);
+      // both players periodically share eaten cells so dropped "eat"s self-heal
+      if (isMultiplayer) maybeBroadcastGrid(now);
     }
     draw();
     rafId = requestAnimationFrame(frame);
@@ -906,6 +969,32 @@ function endTouch(e) {
 canvas.addEventListener("touchend",    endTouch, { passive: true });
 canvas.addEventListener("touchcancel", endTouch, { passive: true });
 
+// ── Tab background / return (mobile app-switch) ───────────────
+// Switching apps (e.g. to FB) suspends this tab's JS: our own pac freezes, but
+// the opponent keeps eating and their fire-and-forget "eat" packets are dropped
+// while we're suspended. On return we'd otherwise still show — and re-eat —
+// those dots. So: freeze on hide, and on return force a full reconcile (pull the
+// host checkpoint + ask peers to union their eaten grid) BEFORE resuming play.
+let resyncWatchdog = null;
+document.addEventListener("visibilitychange", () => {
+  if (!isMultiplayer || gameOver || !liveOnline) return;
+  if (document.hidden) {
+    resyncPending = true;   // frozen until we reconcile on return
+    return;
+  }
+  // Became visible again → reconcile.
+  resyncPending = true;
+  try { Usion.game.requestSync(0); } catch (_) {}
+  try { Usion.game.realtime("request_state", {}); } catch (_) {}
+  broadcastGridSync();      // share our own eats so the peer unions them too
+  // Fallback: if no snapshot lands (peer also away), don't freeze forever.
+  if (resyncWatchdog) clearTimeout(resyncWatchdog);
+  resyncWatchdog = setTimeout(() => {
+    resyncPending = false;
+    if (!gameOver) updateStatus();
+  }, 2500);
+});
+
 // ── Bot AI ────────────────────────────────────────────────
 let botRetargetTimer = 0;
 let botTarget = null;
@@ -978,6 +1067,17 @@ let lastPosBroadcast = 0;
 function maybeBroadcastPos(now) {
   if (now - lastPosBroadcast < 80) return;
   broadcastPosNow(now);
+}
+
+// Both players periodically share their eaten-cells grid; the peer union-merges
+// it. Makes the dots grid eventually-consistent within ~2s so ANY dropped "eat"
+// packet self-heals — the definitive fix for re-eating already-eaten dots.
+let lastGridBroadcast = 0;
+function maybeBroadcastGrid(now) {
+  if (!isMultiplayer) return;
+  if (now - lastGridBroadcast < 2000) return;
+  lastGridBroadcast = now;
+  broadcastGridSync();
 }
 
 function broadcastPosNow(now) {
@@ -1122,14 +1222,24 @@ function onRealtime(data) {
   // Any packet from a peer proves they're connected → cancel a pending forfeit.
   if (forfeitTimer) resumeFromGrace();
   if (data.action_type === "request_state") {
-    // A peer rejoined and wants the live grid + positions. Host answers with the
-    // authoritative grid; everyone re-broadcasts their own pac so it syncs fast.
+    // A peer rejoined / returned from background and wants to reconcile. Host
+    // answers with the authoritative snapshot; EVERYONE shares their eaten-cells
+    // grid (so the requester unions in dots it missed) and re-broadcasts its pac.
     if (isHostPlayer()) broadcastFullSync();
+    broadcastGridSync();
     if (isMultiplayer && myPlayer) broadcastPosNow();
     return;
   }
   if (data.action_type === "fullsync" && data.action_data) {
     applyFullSync(data.action_data);
+    return;
+  }
+  if (data.action_type === "gridsync" && data.action_data) {
+    // Peer's eaten-cells grid → union-merge (heals dots eaten while backgrounded).
+    const snap = data.action_data;
+    if (typeof snap.mazeIndex === "number" && snap.mazeIndex !== mazeIndex) return;
+    mergeEatenFromRows(snap.grid);
+    resyncPending = false;
     return;
   }
   if (data.action_type === "gameover" && data.action_data) {
