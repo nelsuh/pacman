@@ -1110,7 +1110,14 @@ Usion.init(async function(config) {
   }
   loadStats(); // fire-and-forget; never block init/render
 
-  if (config.roomId) {
+  // Trust the host's declared launch mode (SDK ≥ 2.18) — a single-player launch
+  // can still carry an auto-created roomId, so don't infer multiplayer from
+  // roomId alone. Register handlers up front regardless, so a later Share-driven
+  // promotion (onRoomAssigned) works even from a solo bot start.
+  const params = (Usion.getLaunchParams && Usion.getLaunchParams()) || {};
+  const mode = params.mode || (config.roomId ? "multiplayer" : "single");
+  registerGameHandlers();
+  if (mode === "multiplayer" && config.roomId) {
     showWaiting();
     await setupMultiplayer(config.roomId);
   } else {
@@ -1135,9 +1142,19 @@ setTimeout(() => {
   setupBotMode();
 }, 1500);
 
-async function setupMultiplayer(roomId) {
+// Register every multiplayer handler ONCE, up front — before connect() and even
+// in solo/bot mode. onX() just stores the callback (no socket required), and
+// registering up front is what makes SOLO → HOST promotion work: when the user
+// opens the game solo from Explore and later taps the host's top-bar Share
+// button, the SDK fires onRoomAssigned and auto connect()+join()s the new room —
+// these handlers must already be wired to catch the resulting onJoined /
+// onPlayerJoined without a race.
+let gameHandlersRegistered = false;
+function registerGameHandlers() {
+  if (gameHandlersRegistered) return;
+  if (!(window.Usion && Usion.game)) return;
+  gameHandlersRegistered = true;
   try {
-    await Usion.game.connect();
     Usion.game.onJoined(onJoined);
     Usion.game.onPlayerJoined(onPlayerJoined);
     Usion.game.onPlayerLeft(onPlayerLeft);
@@ -1146,6 +1163,7 @@ async function setupMultiplayer(roomId) {
     Usion.game.onRealtime(onRealtime);
     Usion.game.onRematchRequest(onRematchRequest);
     Usion.game.onGameRestarted(onGameRestarted);
+    Usion.game.onRoomAssigned(onRoomAssigned);
     Usion.game.onDisconnect(() => {
       if (!isMultiplayer || gameOver) return;
       // Real pause: freeze movement/broadcast so a disconnected client can't
@@ -1162,11 +1180,36 @@ async function setupMultiplayer(roomId) {
       try { Usion.game.requestSync(0); } catch (_) {}
       try { Usion.game.realtime("request_state", {}); } catch (_) {}
     });
+  } catch (_) {}
+}
+
+async function setupMultiplayer(roomId) {
+  try {
+    registerGameHandlers();
+    await Usion.game.connect();
     await Usion.game.join(roomId);
   } catch (err) {
     console.error("MP setup failed:", err);
     setupBotMode();
   }
+}
+
+// Solo → host promotion (SDK ≥ 2.20). The user opened Pac Duel solo from Explore
+// (playing the bot), then tapped the host's Share button to invite a friend. The
+// SDK has ALREADY set config.roomId/mode and is connect()+join()ing this room for
+// us; we just flip the solo bot game into the multiplayer waiting view so
+// onJoined / onPlayerJoined can start the online match once the friend lands.
+function onRoomAssigned() {
+  if (isMultiplayer) return;                 // already online — nothing to flip
+  clearForfeitGrace();
+  // We are the host now (playerIds[0]). Adopt the freshest roster from config; if
+  // it still lists only us, let the join ack / player_joined fill the 2nd seat.
+  const cfgIds = (window.Usion && Usion.config && Usion.config.playerIds) || [];
+  if (cfgIds.length >= 2) { players = cfgIds.slice(); rosterFromConfig = true; }
+  else { players = myId ? [myId] : []; rosterFromConfig = false; }
+  connectedCount = Math.max(connectedCount, 1);
+  if (diffSelect) diffSelect.style.display = "none";
+  showWaiting();                             // sets waitingForOpponent = true
 }
 
 function onJoined(data) {
