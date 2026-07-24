@@ -144,6 +144,7 @@ let animMouth = 0;             // 0..1 mouth open/close cycle
 let myId = null;
 let myPlayer = 0;              // 1 or 2
 let players = [];              // [p1_id, p2_id]
+let matchPlayerIds = [];       // stable two-player roster for result reporting
 let playerNames = {};
 let playerAvatars = {};
 let isMultiplayer = false;
@@ -167,6 +168,7 @@ let lastCheckpointVersion = 0;  // monotonic version of the last host checkpoint
 
 let myStats = { bestScore: 0, wins: 0, losses: 0, games: 0 };
 let statsRecordedThisGame = false;
+let resultReportedThisGame = false;
 const STATS_KEY = "pacman:stats";
 
 function isHostPlayer() {
@@ -233,6 +235,36 @@ function recordOutcome(winnerPlayer) {
   }
   persistStats();
   submitLeaderboard();
+}
+
+// Report one authoritative 1v1 result. Normal endings include final points;
+// forfeits omit scores because the winner may have had fewer points when the
+// opponent left. Usion chooses group-chat vs DM delivery from the room origin.
+function reportMatchResult(winnerPlayer, includeScores) {
+  if (resultReportedThisGame) return;
+  if (!isMultiplayer || !isHostPlayer()) return;
+  const participants = matchPlayerIds.length === 2 ? matchPlayerIds : players;
+  if (!Array.isArray(participants) || participants.length !== 2) return;
+  if (participants[0] == null || participants[1] == null) return;
+  if (winnerPlayer !== 0 && winnerPlayer !== 1 && winnerPlayer !== 2) return;
+  if (!window.Usion || !Usion.game || typeof Usion.game.reportResult !== "function") return;
+
+  const payload = {};
+  if (winnerPlayer === 0) payload.draw = true;
+  else payload.winnerId = participants[winnerPlayer - 1];
+
+  if (includeScores) {
+    const scores = {};
+    scores[participants[0]] = Number(pacmen[1].score) || 0;
+    scores[participants[1]] = Number(pacmen[2].score) || 0;
+    payload.scores = scores;
+    payload.metric = "points";
+  }
+
+  resultReportedThisGame = true;
+  try {
+    Usion.game.reportResult(payload).catch(function () {});
+  } catch (_) { /* result delivery must never block the winner screen */ }
 }
 
 // Host (sorted playerIds[0]) checkpoints authoritative state so reconnecting
@@ -326,6 +358,7 @@ function reconcileCheckpoint(state) {
   if (typeof state.version === "number" && state.version <= lastCheckpointVersion) return false;
   if (Array.isArray(state.order) && state.order.length) players = state.order.slice();
   if (!players || players.length < 2) return false;
+  matchPlayerIds = players.slice(0, 2);
   const mp = players.indexOf(myId) + 1;
   if (mp < 1) return false; // not a seated player in this checkpoint
 
@@ -488,6 +521,7 @@ function forfeitWin() {
   gameOver = true;
   lastWinnerPlayer = myPlayer || 1;
   recordOutcome(lastWinnerPlayer);
+  reportMatchResult(lastWinnerPlayer, false);
   hostCheckpoint();
   showWinner();
 }
@@ -561,6 +595,7 @@ function resetGame(keepMaze) {
   rematchRequested = false;
   rematchStarting = false;
   statsRecordedThisGame = false;
+  resultReportedThisGame = false;
   hideBanner();
   updateScores();
   updateStatus();
@@ -831,6 +866,7 @@ function finalizeGame() {
   else lastWinnerPlayer = 0;
   if (isMultiplayer && isHostPlayer()) {
     try { Usion.game.realtime("gameover", { winner: lastWinnerPlayer, s1, s2 }); } catch (_) {}
+    reportMatchResult(lastWinnerPlayer, true);
   }
   recordOutcome(lastWinnerPlayer);
   hostCheckpoint();
@@ -1381,6 +1417,7 @@ function startOnline() {
   isMultiplayer = true;
   liveOnline = true;
   waitingForOpponent = false;
+  matchPlayerIds = players.slice(0, 2);
   myPlayer = players.indexOf(myId) + 1;
   hideWaiting();
   updatePanels();
