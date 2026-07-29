@@ -161,7 +161,7 @@ let liveOnline = false;         // true once I'm actively playing THIS online ma
 let resyncPending = false;      // true from tab-return until an authoritative snapshot lands → freeze so we can't re-eat already-eaten dots
 let lastCheckpointVersion = 0;  // monotonic version of the last host checkpoint I applied — gates out stale/duplicate ones
 
-// ── Usion capabilities: cloud stats · leaderboard · notify · checkpoint ──
+// ── Usion capabilities: cloud stats · leaderboard · checkpoint ──
 // All wrappers are defensive: missing modules / standalone preview must never
 // throw (a thrown error in init blanks the game). They no-op gracefully.
 // Pac-Man is score-based (eat dots) and real-time (no turns) → no "Your turn".
@@ -208,11 +208,6 @@ function submitLeaderboard() {
   } catch (_) {}
 }
 
-function notifySelf(title, body) {
-  // Notifications disabled — no push/banner is sent.
-  // try { if (window.Usion && Usion.notify && document.hidden) Usion.notify.send({ title, body }); } catch (_) {}
-}
-
 // Record MY outcome exactly once per game (idempotent across replay/dup events).
 // bestScore is tracked for ALL runs; win/loss/games only for multiplayer.
 function recordOutcome(winnerPlayer) {
@@ -224,12 +219,8 @@ function recordOutcome(winnerPlayer) {
     myStats.games += 1;
     if (winnerPlayer && winnerPlayer === myPlayer) {
       myStats.wins += 1;
-      notifySelf("You won! 🎉", "You won your Pac-Man match");
     } else if (winnerPlayer) {
       myStats.losses += 1;
-      notifySelf("Match over", "Your Pac-Man match ended");
-    } else {
-      notifySelf("Match over", "Your Pac-Man match ended in a tie");
     }
     try { if (window.Usion && Usion.cloud && Usion.cloud.shared) Usion.cloud.shared.incr("games_total", 1); } catch (_) {}
   }
@@ -1284,7 +1275,6 @@ function onPlayerLeft(data) {
   if (!rosterFromConfig && data && data.player_ids) players = data.player_ids;
   connectedCount = Math.max(0, connectedCount - 1);
   if (gameOver) return;
-  notifySelf("Opponent left", "Your opponent left the Pac-Man match");
   // Mid-match: give the opponent a grace window to rejoin before forfeit.
   startForfeitGrace();
 }
