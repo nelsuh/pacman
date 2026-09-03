@@ -1,6 +1,98 @@
 // ── Mazes ─────────────────────────────────────────────────
 // '#'=wall '.'=dot 'o'=power pellet ' '=empty 'A'=spawn1 'B'=spawn2
 // All mazes are 17 cols x 13 rows, symmetric, connected.
+// ── i18n ─────────────────────────────────────────────────
+// Every user-facing string lives here, chosen from the platform language
+// (Usion.getLanguage() / config.language) — never hardcode UI text to one
+// locale. Values may be a string or a function of runtime args. Keep both
+// locales in sync.
+const STR = {
+  en: {
+    appName: "Pac Duel",
+    you: "You",
+    bot: "Bot",
+    opponent: "Opponent",
+    // status line
+    eatDotsToWin: "Eat dots to win!",
+    mpHint: "Eat dots! Power up to eat opponent.",
+    touchHint: "Drag anywhere to move",
+    keyHint: "Arrow keys or WASD to move",
+    connectionLost: "Connection lost — paused…",
+    oppLeftRejoin: (s) => "Opponent left — waiting to rejoin… (" + s + "s)",
+    // winner banner
+    tieGame: "Tie game",
+    winSuffix: " win!",
+    playAgain: "Play Again",
+    rematch: "Rematch",
+    acceptRematch: "Accept Rematch",
+    waitingForRematch: "Waiting for rematch…",
+    // difficulty
+    levelEasy: "Easy", levelMedium: "Medium", levelHard: "Hard",
+    // waiting overlay
+    waitingForOpponent: "Waiting for opponent…",
+    playVsBot: "Play vs Bot instead",
+  },
+  mn: {
+    appName: "Пак тулаан",
+    you: "Та",
+    bot: "Бот",
+    opponent: "Өрсөлдөгч",
+    eatDotsToWin: "Цэгүүдийг идэж ял!",
+    mpHint: "Цэг ид! Хүчирхэгжвэл өрсөлдөгчөө идэж чадна.",
+    touchHint: "Хаана ч чирж хөдөл",
+    keyHint: "Сумны товч эсвэл WASD-аар хөдөл",
+    connectionLost: "Холболт тасарлаа — түр зогслоо…",
+    oppLeftRejoin: (s) => "Өрсөлдөгч гарлаа — эргэж ортол хүлээж байна… (" + s + "с)",
+    tieGame: "Тэнцлээ",
+    winSuffix: " яллаа!",
+    playAgain: "Дахин тоглох",
+    rematch: "Дахин тулах",
+    acceptRematch: "Дахин тулахыг зөвшөөрөх",
+    waitingForRematch: "Дахин тулахыг хүлээж байна…",
+    levelEasy: "Амархан", levelMedium: "Дунд", levelHard: "Хэцүү",
+    waitingForOpponent: "Өрсөлдөгчөө хүлээж байна…",
+    playVsBot: "Оронд нь боттой тоглох",
+  },
+};
+let LANG = "en";
+function t(key) {
+  let v = STR[LANG] ? STR[LANG][key] : undefined;
+  if (v === undefined) v = STR.en[key];
+  if (typeof v === "function") return v.apply(null, Array.prototype.slice.call(arguments, 1));
+  return v !== undefined ? v : key;
+}
+// Platform language first (config.language, then Usion.getLanguage()); the
+// browser hint is only a fallback before the host has booted.
+function detectLang(cfgLang) {
+  let src = cfgLang;
+  if (!src) {
+    try { src = window.Usion && window.Usion.getLanguage && window.Usion.getLanguage(); } catch (_) {}
+  }
+  if (!src) src = (navigator.languages && navigator.languages[0]) || navigator.language || "en";
+  return String(src).toLowerCase().indexOf("mn") === 0 ? "mn" : "en";
+}
+// Set the active locale and fill every static (index.html) string. Safe to call
+// again once the platform language arrives after the first paint.
+function applyLang(lang) {
+  LANG = lang === "mn" ? "mn" : "en";
+  try { document.documentElement.lang = LANG; } catch (_) {}
+  try { document.title = t("appName"); } catch (_) {}
+  const byQ = (sel, key) => { const el = document.querySelector(sel); if (el) el.textContent = t(key); };
+  // "<strong>Name</strong> win!" — only the trailing text node is the phrase.
+  const wt = document.querySelector(".winner-banner-text");
+  if (wt && wt.lastChild && wt.lastChild.nodeType === 3) wt.lastChild.nodeValue = t("winSuffix");
+  const diff = document.getElementById("difficulty");
+  if (diff) {
+    const names = ["levelEasy", "levelMedium", "levelHard"];
+    Array.prototype.forEach.call(diff.options, (opt, i) => { if (names[i]) opt.textContent = t(names[i]); });
+  }
+  byQ(".waiting-text", "waitingForOpponent");
+  byQ("#playBotBtn", "playVsBot");
+  // Live UI re-renders with the new strings.
+  try { if (!gameOver) updateStatus(); else showWinner(); } catch (_) {}
+  try { if (isMultiplayer) updatePanels(); else { p1Name.textContent = playerNames[myId] || t("you"); p2Name.textContent = t("bot"); } } catch (_) {}
+}
+
 const MAZES = [
   // 0 — Cross corridors (classic)
   [
@@ -482,12 +574,12 @@ function startForfeitGrace() {
   if (!isMultiplayer || gameOver) return;
   clearForfeitGrace();
   let secs = Math.ceil(FORFEIT_GRACE_MS / 1000);
-  updateStatus("Opponent left — waiting to rejoin… (" + secs + "s)");
+  updateStatus(t("oppLeftRejoin", secs));
   forfeitTimer = setInterval(() => {
     if (gameOver || connectedCount > 1) { clearForfeitGrace(); updateStatus(); return; }
     secs -= 1;
     if (secs > 0) {
-      updateStatus("Opponent left — waiting to rejoin… (" + secs + "s)");
+      updateStatus(t("oppLeftRejoin", secs));
       return;
     }
     clearForfeitGrace();
@@ -1126,8 +1218,9 @@ let initFired = false;
 Usion.init(async function(config) {
   initFired = true;
   if (bootedStandalone) return;
+  applyLang(detectLang(config.language)); // platform locale — before any UI is built
   myId = config.userId;
-  playerNames[myId] = config.userName || "You";
+  playerNames[myId] = config.userName || t("you");
   if (config.userAvatar) playerAvatars[myId] = config.userAvatar;
   // Canonical platform roster (playerIds[0] = host). Seed seating from it so both
   // clients agree on player 1 vs 2 (spawn/color) regardless of join-ack order.
@@ -1196,7 +1289,7 @@ function registerGameHandlers() {
       // Real pause: freeze movement/broadcast so a disconnected client can't
       // drift ahead. Resync on return restores the authoritative grid + scores.
       netPaused = true;
-      updateStatus("Connection lost — paused…");
+      updateStatus(t("connectionLost"));
     });
     Usion.game.onReconnect(() => {
       netPaused = false;
@@ -1419,8 +1512,8 @@ function setupBotMode() {
   isMultiplayer = false;
   hideWaiting();
   myPlayer = 1;
-  p1Name.textContent = playerNames[myId] || "You";
-  p2Name.textContent = "Bot";
+  p1Name.textContent = playerNames[myId] || t("you");
+  p2Name.textContent = t("bot");
   if (playerAvatars[myId]) p1Avatar.src = playerAvatars[myId];
   p2Avatar.src = "https://api.dicebear.com/7.x/bottts/svg?seed=cyan";
   resetGame();
@@ -1429,11 +1522,11 @@ function setupBotMode() {
 function updatePanels() {
   const p1 = players[0], p2 = players[1];
   if (p1) {
-    p1Name.textContent = p1 === myId ? "You" : (playerNames[p1] || "Opponent");
+    p1Name.textContent = p1 === myId ? t("you") : (playerNames[p1] || t("opponent"));
     if (playerAvatars[p1]) p1Avatar.src = playerAvatars[p1];
   }
   if (p2) {
-    p2Name.textContent = p2 === myId ? "You" : (playerNames[p2] || "Opponent");
+    p2Name.textContent = p2 === myId ? t("you") : (playerNames[p2] || t("opponent"));
     if (playerAvatars[p2]) p2Avatar.src = playerAvatars[p2];
   }
 }
@@ -1458,22 +1551,22 @@ function updateStatus(text) {
   if (text) { statusEl.hidden = false; statusEl.textContent = text; return; }
   if (gameOver) return;
   statusEl.hidden = false;
-  const hint = ("ontouchstart" in window) ? "Drag anywhere to move" : "Arrow keys or WASD to move";
-  statusEl.textContent = isMultiplayer ? "Eat dots! Power up to eat opponent." : hint;
+  const hint = t(("ontouchstart" in window) ? "touchHint" : "keyHint");
+  statusEl.textContent = isMultiplayer ? t("mpHint") : hint;
 }
 
 function hideBanner() { winnerBanner.hidden = true; }
 
 function showWinner() {
   let name, emoji;
-  if (lastWinnerPlayer === 0) { name = "Tie game"; emoji = "🤝"; }
+  if (lastWinnerPlayer === 0) { name = t("tieGame"); emoji = "🤝"; }
   else {
     const idx = lastWinnerPlayer;
     if (isMultiplayer) {
       const id = players[idx - 1];
-      name = id === myId ? "You" : (playerNames[id] || "Opponent");
+      name = id === myId ? t("you") : (playerNames[id] || t("opponent"));
     } else {
-      name = idx === 1 ? "You" : "Bot";
+      name = idx === 1 ? t("you") : t("bot");
     }
     emoji = idx === 1 ? "🟡" : "🔵";
   }
@@ -1482,7 +1575,7 @@ function showWinner() {
   statusEl.hidden = true;
   if (isMultiplayer) syncRematchUi();
   else {
-    winnerBtn.textContent = "Play Again";
+    winnerBtn.textContent = t("playAgain");
     winnerBtn.disabled = false;
     winnerBtn.onclick = () => { hideBanner(); resetGame(); };
   }
@@ -1504,15 +1597,18 @@ function clickRematch() {
 
 function syncRematchUi() {
   if (rematchState === "requested" && !rematchRequested) {
-    winnerBtn.textContent = "Accept Rematch";
+    winnerBtn.textContent = t("acceptRematch");
     winnerBtn.disabled = false;
     winnerBtn.onclick = clickRematch;
   } else if (rematchRequested) {
-    winnerBtn.textContent = "Waiting for rematch…";
+    winnerBtn.textContent = t("waitingForRematch");
     winnerBtn.disabled = true;
   } else {
-    winnerBtn.textContent = "Rematch";
+    winnerBtn.textContent = t("rematch");
     winnerBtn.disabled = false;
     winnerBtn.onclick = clickRematch;
   }
 }
+
+// ── Boot: locale ─────────────────────────────────────────
+applyLang(detectLang());
