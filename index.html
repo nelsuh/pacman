@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Pac Duel</title>
 <link rel="stylesheet" href="https://usions.com/usion-design-system.css">
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=6">
 </head>
 
 <body>
@@ -20,7 +20,11 @@
       <div class="score" id="player1Score">0</div>
     </div>
 
-    <div class="vs">VS</div>
+    <div class="vs-col">
+      <div class="vs">VS</div>
+      <button id="chatToggle" class="chat-toggle" type="button" hidden
+        aria-label="Quick chat" aria-expanded="false" aria-controls="chatPicker">💬</button>
+    </div>
 
     <div class="player right" id="player2Panel">
       <img id="player2Avatar" src="https://api.dicebear.com/7.x/bottts/svg?seed=cyan">
@@ -59,8 +63,23 @@
   </div>
 </div>
 
+<!-- Quick chat: room relay only, shown once two real players are connected. -->
+<div id="chatBackdrop" class="chat-backdrop" hidden></div>
+<div id="chatPicker" class="chat-picker" aria-hidden="true">
+  <div class="chat-picker-title" id="chatPickerTitle">Quick chat</div>
+  <div class="chat-emojis" id="chatEmojis" role="group"></div>
+  <div class="chat-phrases" id="chatPhrases"></div>
+  <form id="customChatForm" class="custom-chat-form" hidden>
+    <button id="customChatBack" class="custom-chat-back" type="button" aria-label="Back to quick chat">←</button>
+    <input id="customChatInput" class="custom-chat-input" type="text" maxlength="60"
+      autocomplete="off" enterkeyhint="send" placeholder="Type a message…">
+    <button id="customChatSend" class="custom-chat-send" type="submit">Send</button>
+  </form>
+</div>
+<div id="reactionLayer" class="reaction-layer" aria-live="polite"></div>
+
 <script src="https://usions.com/usion-sdk.js"></script>
-<script src="script.js?v=7"></script>
+<script src="script.js?v=8"></script>
 
 </body>
 </html>

@@ -31,6 +31,14 @@ const STR = {
     // waiting overlay
     waitingForOpponent: "Waiting for opponent…",
     playVsBot: "Play vs Bot instead",
+    // quick chat
+    quickChat: "Quick chat",
+    customChat: "Custom",
+    reactions: "Reactions",
+    customChatPlaceholder: "Type a message…",
+    backToQuickChat: "Back to quick chat",
+    send: "Send",
+    chatPhrases: ["Good luck!", "Nice one!", "Catch me if you can!", "Hurry up 😄", "Oops!", "So close!", "GG!", "One more?"],
   },
   mn: {
     appName: "Пак тулаан",
@@ -52,6 +60,13 @@ const STR = {
     levelEasy: "Амархан", levelMedium: "Дунд", levelHard: "Хэцүү",
     waitingForOpponent: "Өрсөлдөгчөө хүлээж байна…",
     playVsBot: "Оронд нь боттой тоглох",
+    quickChat: "Түргэн чат",
+    customChat: "Өөрөө бичих",
+    reactions: "Сэтгэл хөдлөл",
+    customChatPlaceholder: "Мессеж бичих…",
+    backToQuickChat: "Түргэн чат руу буцах",
+    send: "Илгээх",
+    chatPhrases: ["Амжилт хүсье!", "Гоё байна!", "Чадвал бариад үз!", "Хурдлаарай 😄", "Өө, алдчихлаа!", "Бараг л болчихсон!", "GG!", "Дахиад нэг үү?"],
   },
 };
 let LANG = "en";
@@ -88,6 +103,7 @@ function applyLang(lang) {
   }
   byQ(".waiting-text", "waitingForOpponent");
   byQ("#playBotBtn", "playVsBot");
+  try { applyChatLanguage(); } catch (_) {}
   // Live UI re-renders with the new strings.
   try { if (!gameOver) updateStatus(); else showWinner(); } catch (_) {}
   try { if (isMultiplayer) updatePanels(); else { p1Name.textContent = playerNames[myId] || t("you"); p2Name.textContent = t("bot"); } } catch (_) {}
@@ -568,6 +584,7 @@ function broadcastGridSync() {
 // frozen (netPaused-style) while the timer runs.
 function clearForfeitGrace() {
   if (forfeitTimer) { clearInterval(forfeitTimer); forfeitTimer = null; }
+  try { updateQuickChatVisibility(); } catch (_) {}
 }
 
 function startForfeitGrace() {
@@ -585,6 +602,7 @@ function startForfeitGrace() {
     clearForfeitGrace();
     if (!gameOver && connectedCount <= 1) forfeitWin();
   }, 1000);
+  updateQuickChatVisibility();
 }
 
 // A peer is back → cancel the pending forfeit and pull fresh state.
@@ -628,6 +646,237 @@ const p1Score      = document.getElementById("player1Score");
 const p2Score      = document.getElementById("player2Score");
 const p1Panel      = document.getElementById("player1Panel");
 const p2Panel      = document.getElementById("player2Panel");
+
+// ── Quick chat ────────────────────────────────────────────
+// Cosmetic room-relay messages (Usion.game.realtime "quick_chat"): never stored,
+// never replayed, never part of match state. Shown only in a live online duel.
+const MAX_CHAT_LENGTH = 60;
+const CHAT_SEND_GAP_MS = 700;
+const CHAT_RECEIVE_GAP_MS = 500;
+const CHAT_BUBBLE_MS = 2500;
+const CHAT_EMOJIS = ["😂", "😘", "😔", "😡", "😱", "😜", "😎", "🔥", "🎉", "😴", "👏", "👍"];
+const chatToggle      = document.getElementById("chatToggle");
+const chatBackdrop    = document.getElementById("chatBackdrop");
+const chatPicker      = document.getElementById("chatPicker");
+const chatEmojiRow    = document.getElementById("chatEmojis");
+const chatPhrases     = document.getElementById("chatPhrases");
+const customChatForm  = document.getElementById("customChatForm");
+const customChatBack  = document.getElementById("customChatBack");
+const customChatInput = document.getElementById("customChatInput");
+const reactionLayer   = document.getElementById("reactionLayer");
+let chatOpen = false;
+let customChatOpen = false;
+let lastQuickChatAt = 0;
+const lastChatFrom = {};
+
+function normalizeChatMessage(value) {
+  if (typeof value !== "string") return "";
+  const message = value.trim().replace(/\s+/g, " ");
+  return message && message.length <= MAX_CHAT_LENGTH ? message : "";
+}
+
+// Only with a real opponent connected: hidden in bot/offline mode, while
+// waiting for the opponent, and during the forfeit grace after they drop.
+function quickChatAvailable() {
+  return isMultiplayer && !waitingForOpponent && !forfeitTimer && connectedCount >= 2;
+}
+
+function updateQuickChatVisibility() {
+  if (!chatToggle) return;
+  const show = quickChatAvailable();
+  chatToggle.hidden = !show;
+  if (!show && chatOpen) setChatPickerOpen(false);
+}
+
+function buildQuickChatPicker() {
+  if (chatEmojiRow) {
+    chatEmojiRow.innerHTML = "";
+    chatEmojiRow.setAttribute("aria-label", t("reactions"));
+    CHAT_EMOJIS.forEach((emoji) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chat-emoji";
+      b.textContent = emoji;
+      b.addEventListener("click", () => sendQuickChat(emoji));
+      chatEmojiRow.appendChild(b);
+    });
+  }
+  if (!chatPhrases) return;
+  chatPhrases.innerHTML = "";
+  (t("chatPhrases") || []).forEach((phrase) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chat-phrase";
+    b.textContent = phrase;
+    b.addEventListener("click", () => sendQuickChat(phrase));
+    chatPhrases.appendChild(b);
+  });
+  const custom = document.createElement("button");
+  custom.type = "button";
+  custom.id = "customChatToggle";
+  custom.className = "chat-phrase chat-custom-toggle";
+  custom.textContent = t("customChat");
+  custom.setAttribute("aria-controls", "customChatForm");
+  custom.setAttribute("aria-expanded", String(customChatOpen));
+  custom.addEventListener("click", () => setCustomChatOpen(true, true));
+  chatPhrases.appendChild(custom);
+}
+
+function applyChatLanguage() {
+  buildQuickChatPicker();
+  const title = document.getElementById("chatPickerTitle");
+  if (title) title.textContent = t("quickChat");
+  const sendBtn = document.getElementById("customChatSend");
+  if (sendBtn) sendBtn.textContent = t("send");
+  if (chatToggle) chatToggle.setAttribute("aria-label", t("quickChat"));
+  if (customChatBack) customChatBack.setAttribute("aria-label", t("backToQuickChat"));
+  if (customChatInput) {
+    customChatInput.placeholder = t("customChatPlaceholder");
+    customChatInput.setAttribute("aria-label", t("customChatPlaceholder"));
+  }
+}
+
+// The picker is position:fixed; while the custom input is up it is lifted by
+// the part of the layout viewport the iOS keyboard covers.
+function updateChatKeyboardInset() {
+  const vv = window.visualViewport;
+  if (!chatPicker || !customChatOpen || !vv) return;
+  const visualBottom = vv.height + vv.offsetTop;
+  const covered = Math.max(0, Math.min(window.innerHeight * 0.7, window.innerHeight - visualBottom));
+  chatPicker.style.setProperty("--chat-keyboard-inset", Math.round(covered) + "px");
+}
+
+function setCustomChatOpen(open, focusInput) {
+  customChatOpen = Boolean(open);
+  if (chatPicker) chatPicker.classList.toggle("custom-mode", customChatOpen);
+  if (customChatForm) customChatForm.hidden = !customChatOpen;
+  const customBtn = document.getElementById("customChatToggle");
+  if (customBtn) customBtn.setAttribute("aria-expanded", String(customChatOpen));
+  if (!customChatOpen && customChatInput && document.activeElement === customChatInput) customChatInput.blur();
+  if (customChatOpen && focusInput && customChatInput) {
+    try { customChatInput.focus({ preventScroll: true }); } catch (_) { customChatInput.focus(); }
+    updateChatKeyboardInset();
+  }
+  if (!customChatOpen && chatPicker) chatPicker.style.setProperty("--chat-keyboard-inset", "0px");
+}
+
+function setChatPickerOpen(open) {
+  chatOpen = Boolean(open);
+  if (!chatOpen) setCustomChatOpen(false, false);
+  if (chatOpen) {
+    // Drop any held joystick so the pac doesn't keep running under the sheet.
+    if (joyTouchId !== null) { joyOrigin = null; joyTouchId = null; stopMyPac(); }
+    // Hang the sheet just under the top bar's chat button.
+    if (chatToggle && chatPicker && chatToggle.getBoundingClientRect) {
+      const r = chatToggle.getBoundingClientRect();
+      if (r && r.bottom > 0) chatPicker.style.setProperty("--chat-top", Math.round(r.bottom + 8) + "px");
+    }
+  }
+  if (chatPicker) {
+    chatPicker.classList.toggle("show", chatOpen);
+    chatPicker.setAttribute("aria-hidden", String(!chatOpen));
+  }
+  if (chatBackdrop) chatBackdrop.hidden = !chatOpen;
+  if (chatToggle) chatToggle.setAttribute("aria-expanded", String(chatOpen));
+}
+
+function sendQuickChat(value) {
+  const phrase = normalizeChatMessage(value);
+  if (!phrase || !quickChatAvailable()) return false;
+  const now = Date.now();
+  if (now - lastQuickChatAt < CHAT_SEND_GAP_MS) return false;
+  lastQuickChatAt = now;
+  setChatPickerOpen(false);
+  showQuickChatBubble(myId, phrase);
+  try { Usion.game.realtime("quick_chat", { phrase }); } catch (_) {}
+  return true;
+}
+
+function receiveQuickChat(senderId, data) {
+  if (!senderId || senderId === myId || !isMultiplayer) return;
+  const phrase = normalizeChatMessage(data && data.phrase);
+  if (!phrase) return;
+  const now = Date.now();
+  if (now - (lastChatFrom[senderId] || 0) < CHAT_RECEIVE_GAP_MS) return;
+  lastChatFrom[senderId] = now;
+  showQuickChatBubble(senderId, phrase);
+}
+
+// Bubble pops beside the sender's avatar, pointing inward toward the VS column
+// (the top bar is already at the top edge, so "above" would sit under the notch).
+function showQuickChatBubble(playerId, value) {
+  const phrase = normalizeChatMessage(value);
+  if (!reactionLayer || !phrase) return;
+  const seat = isMultiplayer ? players.indexOf(playerId) + 1 : 1;
+  if (seat !== 1 && seat !== 2) return;
+  const anchor = (seat === 1 ? p1Avatar : p2Avatar) || (seat === 1 ? p1Panel : p2Panel);
+  if (!anchor) return;
+  // One live bubble per seat: a new line replaces the last one.
+  const old = reactionLayer.querySelector(".reaction-bubble.p" + seat);
+  if (old) old.remove();
+  const bubble = document.createElement("div");
+  bubble.className = "reaction-bubble p" + seat;
+  if (CHAT_EMOJIS.includes(phrase)) bubble.classList.add("is-emoji");
+  bubble.textContent = phrase;
+  reactionLayer.appendChild(bubble);
+  const rect = anchor.getBoundingClientRect();
+  const w = bubble.offsetWidth;
+  const h = bubble.offsetHeight;
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const left = seat === 1 ? rect.right + 8 : rect.left - 8 - w;
+  bubble.style.left = Math.round(Math.max(8, Math.min(left, vw - w - 8))) + "px";
+  bubble.style.top = Math.round(Math.max(4, rect.top + rect.height / 2 - h / 2)) + "px";
+  const pop = () => bubble.classList.add("pop");
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(pop); else setTimeout(pop, 0);
+  setTimeout(() => bubble.classList.add("out"), CHAT_BUBBLE_MS - 400);
+  setTimeout(() => bubble.remove(), CHAT_BUBBLE_MS);
+}
+
+if (chatToggle) {
+  chatToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!chatToggle.hidden) setChatPickerOpen(!chatOpen);
+  });
+}
+// The backdrop swallows the closing tap/swipe so it never reaches the maze's
+// drag joystick; it closes on click so the whole press lands on the backdrop.
+if (chatBackdrop) {
+  ["pointerdown", "touchstart", "touchmove"].forEach((type) => {
+    chatBackdrop.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+  });
+  chatBackdrop.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setChatPickerOpen(false);
+  });
+}
+if (chatPicker) {
+  ["pointerdown", "touchstart", "touchmove", "click"].forEach((type) => {
+    chatPicker.addEventListener(type, (e) => e.stopPropagation(), { passive: true });
+  });
+}
+if (customChatBack) customChatBack.addEventListener("click", () => setCustomChatOpen(false, false));
+if (customChatForm) {
+  customChatForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (customChatInput && sendQuickChat(customChatInput.value)) customChatInput.value = "";
+  });
+}
+// Typing stays in the field: WASD / arrows must not steer the pac.
+if (customChatInput) {
+  customChatInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") setChatPickerOpen(false);
+  });
+  customChatInput.addEventListener("keyup", (e) => e.stopPropagation());
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && chatOpen) setChatPickerOpen(false);
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", updateChatKeyboardInset);
+  window.visualViewport.addEventListener("scroll", updateChatKeyboardInset);
+}
 
 // ── Init / Reset ──────────────────────────────────────────
 function buildGrid() {
@@ -1338,6 +1587,7 @@ function onJoined(data) {
   if (!rosterFromConfig && data.player_ids) players = data.player_ids;
   connectedCount = Number(data.connected_count || 0);
   if (data.sequence !== undefined) lastSequence = data.sequence;
+  updateQuickChatVisibility();
   Usion.game.realtime("info", {
     name: playerNames[myId],
     avatar: playerAvatars[myId] || null,
@@ -1362,11 +1612,13 @@ function onPlayerJoined(data) {
     avatar: playerAvatars[myId] || null,
   });
   if (connectedCount >= 2 && waitingForOpponent) startOnline();
+  updateQuickChatVisibility();
 }
 
 function onPlayerLeft(data) {
   if (!rosterFromConfig && data && data.player_ids) players = data.player_ids;
   connectedCount = Math.max(0, connectedCount - 1);
+  updateQuickChatVisibility();
   if (gameOver) return;
   // Mid-match: give the opponent a grace window to rejoin before forfeit.
   startForfeitGrace();
@@ -1383,6 +1635,10 @@ function onRealtime(data) {
   if (data.player_id === myId) return;
   // Any packet from a peer proves they're connected → cancel a pending forfeit.
   if (forfeitTimer) resumeFromGrace();
+  if (data.action_type === "quick_chat") {
+    receiveQuickChat(data.player_id, data.action_data);
+    return;
+  }
   if (data.action_type === "request_state") {
     // A peer rejoined / returned from background and wants to reconcile. Host
     // answers with the authoritative snapshot; EVERYONE shares their eaten-cells
@@ -1506,6 +1762,7 @@ function startOnline() {
   updatePanels();
   diffSelect.style.display = "none";
   resetGame();
+  updateQuickChatVisibility();
 }
 
 function setupBotMode() {
@@ -1535,8 +1792,9 @@ function updatePanels() {
 function showWaiting() {
   waitingForOpponent = true;
   waitingOverlay.classList.add("show");
+  updateQuickChatVisibility();
 }
-function hideWaiting() { waitingOverlay.classList.remove("show"); }
+function hideWaiting() { waitingOverlay.classList.remove("show"); updateQuickChatVisibility(); }
 
 playBotBtn.addEventListener("click", () => { setupBotMode(); });
 
