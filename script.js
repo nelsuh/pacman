@@ -28,7 +28,7 @@ const STR = {
     acceptRematch: "Accept Rematch",
     waitingForRematch: "Waiting for rematch…",
     // difficulty
-    levelEasy: "Easy", levelMedium: "Medium", levelHard: "Hard",
+    levelEasy: "Easy · ×0.5 pts", levelMedium: "Medium · ×1 pts", levelHard: "Hard · ×1.5 pts",
     // start countdown
     go: "Go!",
     // waiting overlay
@@ -60,7 +60,7 @@ const STR = {
     rematch: "Дахин тулах",
     acceptRematch: "Дахин тулахыг зөвшөөрөх",
     waitingForRematch: "Дахин тулахыг хүлээж байна…",
-    levelEasy: "Амархан", levelMedium: "Дунд", levelHard: "Хэцүү",
+    levelEasy: "Амархан · ×0.5 оноо", levelMedium: "Дунд · ×1 оноо", levelHard: "Хэцүү · ×1.5 оноо",
     go: "Эхэл!",
     waitingForOpponent: "Өрсөлдөгчөө хүлээж байна…",
     playVsBot: "Оронд нь боттой тоглох",
@@ -345,6 +345,12 @@ const SCORE_DOT = 10;
 const SCORE_PELLET = 50;
 const SCORE_EAT = 100;         // bonus for eating opponent
 const PENALTY_DEATH = 50;
+// Solo points scale with the bot's difficulty so an easy run can't top the
+// leaderboard over a hard one. Online is always 1x. Locked at match start
+// (changing difficulty restarts the match).
+const DIFF_MULT = { easy: 0.5, medium: 1, hard: 1.5 };
+let scoreMult = 1;
+function pts(base) { return Math.round(base * scoreMult); }
 
 let gameOver = false;
 // Every new match (solo, online start, rematch) opens with a 3-2-1 freeze.
@@ -1036,6 +1042,7 @@ function resetGame(keepMaze) {
     pacmen[i].dead = 0;
   }
   gameOver = false;
+  scoreMult = isMultiplayer ? 1 : (DIFF_MULT[diffSelect.value] || 1);
   countdownEnd = performance.now() + COUNTDOWN_MS;
   lastWinnerPlayer = 0;
   lastCheckpointVersion = 0;   // new match → old checkpoints must not gate the new ones
@@ -1186,7 +1193,7 @@ function eatAt(p) {
   const isPellet = c === "o";
   grid[ty][tx] = " ";
   const idx = pacmen.indexOf(p);
-  pacmen[idx].score += isPellet ? SCORE_PELLET : SCORE_DOT;
+  pacmen[idx].score += pts(isPellet ? SCORE_PELLET : SCORE_DOT);
   if (isPellet) pacmen[idx].powered = POWER_TIME;
   totalDots--;
   updateScores();
@@ -1311,13 +1318,13 @@ function checkCollision() {
   if (dx*dx + dy*dy > 0.6*0.6) return;
 
   if (p1.powered > 0 && p2.powered <= 0) {
-    p1.score += SCORE_EAT;
-    p2.score = Math.max(0, p2.score - PENALTY_DEATH);
+    p1.score += pts(SCORE_EAT);
+    p2.score = Math.max(0, p2.score - pts(PENALTY_DEATH));
     p2.dead = RESPAWN_TIME;
     updateScores();
   } else if (p2.powered > 0 && p1.powered <= 0) {
-    p2.score += SCORE_EAT;
-    p1.score = Math.max(0, p1.score - PENALTY_DEATH);
+    p2.score += pts(SCORE_EAT);
+    p1.score = Math.max(0, p1.score - pts(PENALTY_DEATH));
     p1.dead = RESPAWN_TIME;
     updateScores();
   }
@@ -1433,6 +1440,11 @@ document.addEventListener("keydown", (e) => {
     case "ArrowLeft": case "a": case "A": setMyDir(-1, 0); e.preventDefault(); break;
     case "ArrowRight": case "d": case "D": setMyDir(1, 0); e.preventDefault(); break;
   }
+});
+
+// Difficulty sets the score multiplier, so a change starts a fresh solo match.
+diffSelect.addEventListener("change", () => {
+  if (!isMultiplayer) { diffSelect.blur(); resetGame(true); }
 });
 
 // Phone turned or window resized → re-fit the board.
