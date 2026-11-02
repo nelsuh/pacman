@@ -29,6 +29,8 @@ const STR = {
     waitingForRematch: "Waiting for rematch…",
     // difficulty
     levelEasy: "Easy", levelMedium: "Medium", levelHard: "Hard",
+    // start countdown
+    go: "Go!",
     // waiting overlay
     waitingForOpponent: "Waiting for opponent…",
     playVsBot: "Play vs Bot instead",
@@ -59,6 +61,7 @@ const STR = {
     acceptRematch: "Дахин тулахыг зөвшөөрөх",
     waitingForRematch: "Дахин тулахыг хүлээж байна…",
     levelEasy: "Амархан", levelMedium: "Дунд", levelHard: "Хэцүү",
+    go: "Эхэл!",
     waitingForOpponent: "Өрсөлдөгчөө хүлээж байна…",
     playVsBot: "Оронд нь боттой тоглох",
     quickChat: "Түргэн чат",
@@ -344,6 +347,12 @@ const SCORE_EAT = 100;         // bonus for eating opponent
 const PENALTY_DEATH = 50;
 
 let gameOver = false;
+// Every new match (solo, online start, rematch) opens with a 3-2-1 freeze.
+// Each client counts from its own reset; a rejoin via checkpoint doesn't reset
+// and so doesn't count down.
+const COUNTDOWN_MS = 3000;
+const GO_MS = 600;             // how long "Go!" lingers after play starts
+let countdownEnd = 0;          // performance.now() when play may begin
 let lastWinnerPlayer = 0;
 let lastTick = 0;
 let rafId = 0;
@@ -1027,6 +1036,7 @@ function resetGame(keepMaze) {
     pacmen[i].dead = 0;
   }
   gameOver = false;
+  countdownEnd = performance.now() + COUNTDOWN_MS;
   lastWinnerPlayer = 0;
   lastCheckpointVersion = 0;   // new match → old checkpoints must not gate the new ones
   rematchState = "idle";
@@ -1076,6 +1086,33 @@ function draw() {
     if (p.dead > 0) continue;
     drawPac(p, ts);
   }
+
+  drawCountdown();
+}
+
+function drawCountdown() {
+  if (gameOver) return;
+  const left = countdownEnd - performance.now();
+  if (left <= -GO_MS) return;
+  const label = left > 0 ? String(Math.ceil(left / 1000)) : t("go");
+  // each number pops in and fades over its own second
+  const phase = left > 0 ? (left % 1000) / 1000 : 1 + left / GO_MS;
+  const size = Math.min(canvas.width, canvas.height) * (0.22 + 0.08 * phase);
+  ctx.save();
+  if (left > 0) {
+    ctx.fillStyle = "rgba(11,14,44,0.45)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  ctx.globalAlpha = Math.max(0, Math.min(1, phase * 1.4));
+  ctx.font = "800 " + Math.round(size) + "px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = size * 0.08;
+  ctx.strokeStyle = "#0b0e2c";
+  ctx.fillStyle = left > 0 ? "#ffe27a" : "#7adfff";
+  ctx.strokeText(label, canvas.width / 2, canvas.height / 2);
+  ctx.fillText(label, canvas.width / 2, canvas.height / 2);
+  ctx.restore();
 }
 
 function drawPac(p, ts) {
@@ -1337,7 +1374,7 @@ function startLoop() {
     // countdown runs, or while a tab-return resync is pending (resyncPending) —
     // a stalled client must not drift ahead of its peer, and must not move/eat
     // before reconciling (else it re-eats dots the opponent already ate).
-    if (!gameOver && !netPaused && !forfeitTimer && !resyncPending) {
+    if (!gameOver && !netPaused && !forfeitTimer && !resyncPending && now >= countdownEnd) {
       step(pacmen[1], dt);
       step(pacmen[2], dt);
       if (!isMultiplayer) botThink(pacmen[2], dt);
