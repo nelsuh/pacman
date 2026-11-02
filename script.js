@@ -1,6 +1,7 @@
 // ── Mazes ─────────────────────────────────────────────────
 // '#'=wall '.'=dot 'o'=power pellet ' '=empty 'A'=spawn1 'B'=spawn2
-// All mazes are 17 cols x 13 rows, symmetric, connected.
+// Mazes are left-right symmetric and fully connected. 0–4 are 17x13; 5–7 grow
+// to 21x15, 25x17 and 29x19 (the board resizes to the maze — applyMazeDims).
 // ── i18n ─────────────────────────────────────────────────
 // Every user-facing string lives here, chosen from the platform language
 // (Usion.getLanguage() / config.language) — never hardcode UI text to one
@@ -190,12 +191,112 @@ const MAZES = [
     "#o.....#.#.....o#",
     "#################",
   ],
+  // 5 — Grand hall (21x15)
+  [
+    "#####################",
+    "#o.................o#",
+    "#.##.####.#.####.##.#",
+    "#.##.####.#.####.##.#",
+    "#...................#",
+    "#.##.#.#######.#.##.#",
+    "#....#.........#....#",
+    "#A##.#.##...##.#.##B#",
+    "#....#.........#....#",
+    "#.##.#.#######.#.##.#",
+    "#...................#",
+    "#.##.####.#.####.##.#",
+    "#.##.####.#.####.##.#",
+    "#o.................o#",
+    "#####################",
+  ],
+  // 6 — Labyrinth (25x17)
+  [
+    "#########################",
+    "#o.....#.........#.....o#",
+    "#.###.#.###.#.###.#.###.#",
+    "#.#o......#...#......o#.#",
+    "#.#.###.#.#.#.#.#.###.#.#",
+    "#.....#.#.......#.#.....#",
+    "###.#.#.###.#.###.#.#.###",
+    "#...#...............#...#",
+    "#A#.#.###.#####.###.#.#B#",
+    "#...#...............#...#",
+    "###.#.#.###.#.###.#.#.###",
+    "#.....#.#.......#.#.....#",
+    "#.#.###.#.#.#.#.#.###.#.#",
+    "#.#o......#...#......o#.#",
+    "#.###.#.###.#.###.#.###.#",
+    "#o.....#.........#.....o#",
+    "#########################",
+  ],
+  // 7 — Citadel (29x19)
+  [
+    "#############################",
+    "#o......#...........#......o#",
+    "#.####.##.####.####.##.####.#",
+    "#.............o.............#",
+    "#.##.#.####.#.#.#.####.#.##.#",
+    "#....#...#..#...#..#...#....#",
+    "####.###.#.##.#.##.#.###.####",
+    "#......#.............#......#",
+    "#.####.#.###.###.###.#.####.#",
+    "#A.........#.....#.........B#",
+    "#.####.#.###.###.###.#.####.#",
+    "#......#.............#......#",
+    "####.###.#.##.#.##.#.###.####",
+    "#....#...#..#...#..#...#....#",
+    "#.##.#.####.#.#.#.####.#.##.#",
+    "#.............o.............#",
+    "#.####.##.####.####.##.####.#",
+    "#o......#...........#......o#",
+    "#############################",
+  ],
 ];
 
 let mazeIndex = 0;
-const MAZE = MAZES[0];
-const COLS = MAZE[0].length;
-const ROWS = MAZE.length;
+let COLS = MAZES[0][0].length;
+let ROWS = MAZES[0].length;
+const TILE_PX = 30;            // canvas pixels per tile; the CSS box scales it
+
+// Mazes differ in size, so the board dimensions follow the current maze.
+function applyMazeDims() {
+  const maze = MAZES[mazeIndex] || MAZES[0];
+  COLS = maze[0].length;
+  ROWS = maze.length;
+  layoutBoard();
+}
+
+// On a portrait phone a wide maze leaves tiny tiles and empty space below, so
+// the board is drawn turned a quarter clockwise whenever that gives clearly
+// bigger tiles. Only the picture turns: the grid, the netcode and the opponent
+// are untouched, and screen-space input is turned back in setMyDir().
+let boardRotated = false;
+const BANNER_RESERVE = 76;     // room kept for the end-of-game banner below the board
+
+function layoutBoard() {
+  const phone = canvas.parentElement;
+  const cs = getComputedStyle(phone);
+  const availW = phone.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  const banner = document.getElementById("winnerBanner");
+  const bannerH = banner && !banner.hidden ? banner.offsetHeight + 14 : 0;
+  const otherH = phone.offsetHeight - canvas.offsetHeight - bannerH;
+  const availH = Math.max(200, vh - otherH - BANNER_RESERVE);
+  const fit = (c, r) => Math.min(TILE_PX, availW / c, availH / r);
+  const flat = fit(COLS, ROWS), turned = fit(ROWS, COLS);
+  boardRotated = turned > flat * 1.15;
+  const sc = boardRotated ? ROWS : COLS, sr = boardRotated ? COLS : ROWS;
+  const tile = boardRotated ? turned : flat;
+  if (canvas.width !== sc * TILE_PX) canvas.width = sc * TILE_PX;
+  if (canvas.height !== sr * TILE_PX) canvas.height = sr * TILE_PX;
+  canvas.style.aspectRatio = sc + " / " + sr;
+  canvas.style.width = Math.floor(tile * sc) + "px";
+}
+
+// Grid cell → canvas cell (turned a quarter clockwise when boardRotated).
+function toScreen(x, y) {
+  return boardRotated ? { x: ROWS - 1 - y, y: x } : { x, y };
+}
 
 // For the initial multiplayer game, both clients deterministically derive the
 // maze from sorted player IDs so they agree without an extra round-trip.
@@ -393,7 +494,10 @@ function hostCheckpoint() {
 // Restore the shared maze + dots-eaten grid from a host snapshot (checkpoint or
 // live fullsync). Rows may be packed strings ("#o..") or arrays.
 function applyGridFromSnap(snap) {
-  if (typeof snap.mazeIndex === "number") mazeIndex = snap.mazeIndex;
+  if (typeof snap.mazeIndex === "number" && MAZES[snap.mazeIndex]) {
+    mazeIndex = snap.mazeIndex;
+    applyMazeDims();
+  }
   if (Array.isArray(snap.grid)) {
     grid = snap.grid.map((row) => (typeof row === "string" ? row.split("") : row.slice()));
   }
@@ -880,7 +984,9 @@ if (window.visualViewport) {
 
 // ── Init / Reset ──────────────────────────────────────────
 function buildGrid() {
-  const maze = MAZES[mazeIndex] || MAZES[0];
+  if (!MAZES[mazeIndex]) mazeIndex = 0;
+  applyMazeDims();
+  const maze = MAZES[mazeIndex];
   grid = [];
   totalDots = 0;
   let spawnA = null, spawnB = null;
@@ -935,10 +1041,8 @@ function resetGame(keepMaze) {
 }
 
 // ── Drawing ───────────────────────────────────────────────
-function tileSize() { return canvas.width / COLS; }
-
 function draw() {
-  const ts = tileSize();
+  const ts = TILE_PX;
   ctx.fillStyle = "#0b0e2c";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -946,20 +1050,21 @@ function draw() {
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {
       const c = grid[y][x];
+      const s = toScreen(x, y);
       if (c === "#") {
         ctx.fillStyle = "#2730a0";
-        ctx.fillRect(x*ts+1, y*ts+1, ts-2, ts-2);
+        ctx.fillRect(s.x*ts+1, s.y*ts+1, ts-2, ts-2);
         ctx.fillStyle = "#3d42ff";
-        ctx.fillRect(x*ts+3, y*ts+3, ts-6, ts-6);
+        ctx.fillRect(s.x*ts+3, s.y*ts+3, ts-6, ts-6);
       } else if (c === ".") {
         ctx.fillStyle = "#fff3a8";
         ctx.beginPath();
-        ctx.arc(x*ts+ts/2, y*ts+ts/2, ts*0.10, 0, Math.PI*2);
+        ctx.arc(s.x*ts+ts/2, s.y*ts+ts/2, ts*0.10, 0, Math.PI*2);
         ctx.fill();
       } else if (c === "o") {
         ctx.fillStyle = "#fff";
         ctx.beginPath();
-        ctx.arc(x*ts+ts/2, y*ts+ts/2, ts*0.28, 0, Math.PI*2);
+        ctx.arc(s.x*ts+ts/2, s.y*ts+ts/2, ts*0.28, 0, Math.PI*2);
         ctx.fill();
       }
     }
@@ -974,12 +1079,15 @@ function draw() {
 }
 
 function drawPac(p, ts) {
-  const cx = p.x*ts + ts/2;
-  const cy = p.y*ts + ts/2;
+  const s = toScreen(p.x, p.y);
+  const cx = s.x*ts + ts/2;
+  const cy = s.y*ts + ts/2;
   const r = ts*0.42;
   // Use current motion if moving; otherwise fall back to last-faced direction
   // so a stopped pac doesn't snap back to facing right.
-  const f = (p.dir.dx || p.dir.dy) ? p.dir : (p.facing || { dx: 1, dy: 0 });
+  const g = (p.dir.dx || p.dir.dy) ? p.dir : (p.facing || { dx: 1, dy: 0 });
+  // facing in screen space, so the eye stays on top on a turned board too
+  const f = boardRotated ? { dx: -g.dy, dy: g.dx } : g;
   // Mirror for left, rotate for up/down — keeps the eye on top regardless of facing.
   let angle = 0, scaleX = 1;
   if (f.dx < 0)      scaleX = -1;
@@ -1259,6 +1367,8 @@ function setMyDir(dx, dy) {
   const me = isMultiplayer ? myPlayer : 1;
   if (!me) return;
   const p = pacmen[me];
+  // Keys and drags are screen directions; turn them back onto the grid.
+  if (boardRotated) { const sx = dx; dx = dy; dy = -sx; }
   // `want` may carry both axes (diagonal drag) — chooseTurn() resolves it to a
   // legal heading at each tile center.
   p.want = { hx: dx, vy: dy };
@@ -1287,6 +1397,10 @@ document.addEventListener("keydown", (e) => {
     case "ArrowRight": case "d": case "D": setMyDir(1, 0); e.preventDefault(); break;
   }
 });
+
+// Phone turned or window resized → re-fit the board.
+window.addEventListener("resize", layoutBoard);
+if (window.visualViewport) window.visualViewport.addEventListener("resize", layoutBoard);
 
 // ── Invisible joystick (mobile only) ──────────────────────
 // No visual at all — touch anywhere on the canvas, drag in a direction, and

@@ -84,7 +84,7 @@ body {
   width: 100%;
   max-width: 510px;
   height: auto;
-  aspect-ratio: 17 / 13;
+  aspect-ratio: 17 / 13;          /* default; script.js sets it per maze */
   border-radius: 14px;
   background: #0b0e2c;
   box-shadow:
